@@ -1,0 +1,4 @@
+# Cronista como teleprompter (función principal desde la 0.2): solo hace falta la interfaz.
+# Para el asistente de notas por voz (`python -m cronista --notas`) instala además requirements.txt.
+PySide6-Essentials>=6.7
+pytest>=8                  # desarrollo

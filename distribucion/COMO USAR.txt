@@ -1,0 +1,30 @@
+CRONISTA - TELEPROMPTER
+=======================
+
+Para Windows 10 y 11.
+
+1. Descomprime el zip: clic derecho sobre Cronista.zip > "Extraer todo".
+   (No lo abras desde dentro del zip: así no se guardaría nada.)
+
+2. Abre la carpeta Cronista y haz doble clic en "Abrir Cronista.bat".
+
+   - La primera vez tarda unos minutos: prepara todo solo y necesita internet (unos 100 MB).
+     Si la computadora no tiene Python, lo instala también (es gratuito).
+   - Si Windows avisa "Windows protegió su PC", pulsa "Más información" > "Ejecutar de todas formas".
+   - Las siguientes veces se abre directamente.
+
+   Puedes crear un acceso directo: clic derecho sobre "Abrir Cronista.bat" > "Enviar a" > "Escritorio".
+
+CÓMO SE USA
+-----------
+- «Editar texto»: escribe o pega tu texto. «Abrir…»: carga un .txt, .md o .docx (o arrástralo a la ventana).
+- Espacio: iniciar / pausar. Al pausar queda una bandera roja donde paraste y la próxima vez sigue desde ahí.
+- Clic en el margen izquierdo de una línea: pone o quita una bandera. B: ir a la siguiente bandera.
+- Flechas arriba / abajo: velocidad. + / -: tamaño de letra. F11: pantalla completa. Esc: salir de ella.
+- M: espejo (para el cristal de un teleprompter). C: centrar líneas. L: cambiar el tipo de letra.
+- «Ángulo de visión»: si miras la pantalla desde arriba o desde abajo, endereza el texto.
+- «Fluidez»: déjalo en Automático (usa los Hz de tu monitor sin sobrecargar la computadora).
+
+Todo se queda en tu computadora: tu texto y tus ajustes se guardan en %APPDATA%\Cronista.
+
+Letras incluidas (licencias libres): ver la carpeta fonts\LICENCIAS.md.

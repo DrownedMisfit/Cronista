@@ -1,0 +1,16 @@
+# Cronista — dependencias (Windows 11, Python 3.12)
+PySide6>=6.7
+numpy>=1.26
+sounddevice>=0.4.7
+soundfile>=0.12
+onnxruntime>=1.17          # Silero VAD
+pyrnnoise>=0.4             # RNNoise (supresión de ruido ligera, 48 kHz)
+faster-whisper>=1.1        # transcripción local (CTranslate2)
+sherpa-onnx>=1.13            # Parakeet-TDT-0.6B-v3: transcripción en vivo rápida en CPU
+ctranslate2>=4.0
+obsws-python>=1.7          # OBS WebSocket 5.x
+keyboard>=0.13             # hotkey global (hook de bajo nivel)
+psutil>=5.9
+requests>=2.31             # solo para proveedores de API opcionales
+python-docx>=1.1             # exportar documentos Word (.docx, también para Google Docs)
+pytest>=8                  # desarrollo
