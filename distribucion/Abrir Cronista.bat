@@ -17,7 +17,7 @@ if exist ".venv\Scripts\pythonw.exe" goto abrir
 
 echo ==========================================================
 echo   Cronista - primera vez: preparando todo
-echo   Solo pasa esta vez. Hace falta internet (unos 100 MB).
+echo   Solo pasa esta vez. Hace falta internet (unos 200 MB).
 echo ==========================================================
 echo.
 
@@ -45,6 +45,8 @@ echo.
 echo Preparando Cronista...
 "%PYEXE%" %PYARG% -m venv .venv || goto error
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requisitos.txt || goto error
+rem Si falla esta descarga, Cronista funciona igual: "Lineas por frases" usa reglas mas simples.
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check "https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.8.0/es_core_news_sm-3.8.0-py3-none-any.whl" || echo Aviso: no se pudo bajar el analizador de frases. Cronista funcionara con reglas mas simples.
 echo.
 echo Listo. Desde ahora Cronista se abre directamente.
 if /i "%~1"=="--solo-instalar" exit /b 0

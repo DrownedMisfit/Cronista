@@ -8,7 +8,7 @@ Para Windows 10 y 11.
 
 2. Abre la carpeta Cronista y haz doble clic en "Abrir Cronista.bat".
 
-   - La primera vez tarda unos minutos: prepara todo solo y necesita internet (unos 100 MB).
+   - La primera vez tarda unos minutos: prepara todo solo y necesita internet (unos 200 MB).
      Si la computadora no tiene Python, lo instala también (es gratuito).
    - Si Windows avisa "Windows protegió su PC", pulsa "Más información" > "Ejecutar de todas formas".
    - Las siguientes veces se abre directamente.
@@ -22,6 +22,7 @@ CÓMO SE USA
 - Clic en el margen izquierdo de una línea: pone o quita una bandera. B: ir a la siguiente bandera.
 - Flechas arriba / abajo: velocidad. + / -: tamaño de letra. F11: pantalla completa. Esc: salir de ella.
 - M: espejo (para el cristal de un teleprompter). C: centrar líneas. L: cambiar el tipo de letra.
+- F o «Líneas por frases»: corta las líneas por frases, para leer en voz alta con pausas naturales.
 - «Ángulo de visión»: si miras la pantalla desde arriba o desde abajo, endereza el texto.
 - «Fluidez»: déjalo en Automático (usa los Hz de tu monitor sin sobrecargar la computadora).
 

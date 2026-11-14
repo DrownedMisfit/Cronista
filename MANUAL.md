@@ -4,7 +4,21 @@ Manual completo del teleprompter.
 
 ## Teleprompter
 
-Solo necesita la interfaz (`requirements-teleprompter.txt`: PySide6-Essentials). Se abre con `run_cronista.bat`.
+Necesita `requirements-teleprompter.txt` (PySide6-Essentials; vosk y sounddevice para el modo Smart). Se abre
+con `run_cronista.bat`.
+
+**Novedades 0.8.0 (04/11/2026)**
+- **⏱ Cuenta atrás y tiempo**: «Cuenta atrás» (sin / 3 s / 5 s) muestra 3-2-1 antes de mover el texto; Espacio
+  o el botón la cancelan. En la primera fila, «⏱ llevas / dura · faltan» a la velocidad actual.
+- **🎙 Smart**: el texto sigue la voz. Reconocimiento local con Vosk (`teleprompter/smart.py`: ScriptFollower
+  encaja lo oído en el guion, solo hacia adelante, tolerante a muletillas; VoiceListener = micrófono 16 kHz +
+  Vosk en un hilo). El modelo pequeño (es/en, ~40 MB, según el idioma del texto) se baja la primera vez a
+  `%APPDATA%\Cronista\modelos`. El micrófono solo se abre mientras se lee. La vista: `set_follow`/`follow_to`
+  (va suave a la línea dicha, τ = 0,35 s; mover a mano reubica). Probado con una narración real: la siguió al 100 %.
+- **📷 Junto a la cámara** (K): franja sin bordes, siempre encima, arriba y al centro (60 % × 30 % de la
+  pantalla); se mueve arrastrando la barra y cambia de tamaño con la esquina; Esc o K vuelve.
+- **Cronista.exe**: `tools/construir_exe.py` (PyInstaller, carpeta + zip en `Exportados/`, sin Python);
+  `Cronista.exe --comprobar RUTA` revisa letras, vosk y sounddevice sin abrir ventanas.
 
 - **Texto**: «✎ Editar texto» para escribir o pegar; «📂 Abrir…» (o arrastrar el archivo a la ventana) para
   `.txt`, `.md` (se quitan los símbolos de Markdown) y `.docx` (Word; un Google Docs se descarga como .docx). El
@@ -23,14 +37,23 @@ Solo necesita la interfaz (`requirements-teleprompter.txt`: PySide6-Essentials).
   donde está la bandera. Pulsarla o arrastrarla salta a esa parte del texto.
 - **Velocidad** 1-30 (10 ≈ un tercio de línea por segundo, ritmo de habla normal) y **tamaño** 20-200 pt. Se
   recuerdan entre usos, igual que el tipo de letra, el espaciado y el espejo.
-- **Tipo de letra** (segunda fila de la barra, o L / Mayús+L mientras lees): nueve de las más legibles. La mejor
-  letra cambia de una persona a otra (Wallace et al., ACM TOCHI 2022: hasta un 35 % más de velocidad entre la
-  mejor y la peor de cada lector), así que conviene probarlas con el texto real. Tres vienen con Cronista en
-  `fonts/` y no se instalan en Windows: Atkinson Hyperlegible Next (Braille Institute, baja visión), Luciole
-  (baja visión) y Lexend; las otras son de Windows: Verdana, Tahoma, Segoe UI, Arial, Calibri y Sitka. Licencias
-  en `fonts/LICENCIAS.md`. No se incluyó OpenDyslexic: en estudios con lectores con dislexia no mejoró la lectura.
-- **Espaciado** 0-50 %: separación extra entre letras. Separarlas ayuda a que no se «amontonen» (Zorzi et al.,
-  PNAS 2012, con lectores con dislexia).
+- **Tipo de letra** (segunda fila de la barra, o L / Mayús+L mientras lees): 19 letras. La mejor letra cambia de
+  una persona a otra (Wallace et al., ACM TOCHI 2022: de media, un 35 % más de velocidad entre la más rápida y la
+  más lenta de 5 letras por lector), así que conviene probarlas con el texto real. Nueve vienen con Cronista en
+  `fonts/` y no se instalan en Windows: Atkinson Hyperlegible Next, Luciole, Lexend, Courier Prime Negrita, Andika,
+  CMU, Intel One Mono, Literata y B612; las otras son de Windows y solo aparecen si el equipo las tiene: Verdana,
+  Tahoma, Segoe UI, Arial, Calibri, Sitka, Georgia, Courier New, Consolas y Cascadia Mono. Licencias en
+  `fonts/LICENCIAS.md`. No se incluyó OpenDyslexic: en estudios con lectores con dislexia no mejoró la lectura.
+  No hay estudios de qué letra ayuda cuando la vista se adelanta a la voz: las añadidas en la 0.9 son para probar.
+- **Líneas por frases** (botón en la tercera fila, o F): primero corta por la puntuación (sin separar enumeraciones,
+  títulos ni abreviaturas). Luego un analizador gramatical local (spaCy con `es_core_news_sm`, sin internet) decide
+  dónde haría una pausa una persona: separa oraciones aunque quepan en la línea, y lo que no quepa con la letra y el
+  ancho actuales lo parte por su mejor punto, sin dejar nunca al final «el», «de», «es»… ni separar nombres. El
+  análisis va en un hilo (~2,5 s para un guion de 7000 palabras); mientras llega, o si spaCy no está, se usan reglas
+  con listas de palabras. Solo cambia cómo se ve: el texto guardado, las banderas y el modo Smart no se alteran. Referencia: en voz alta, los cortes por frase mejoraron el fraseo sin cambiar la
+  velocidad (LeVasseur et al. 2006, con niños de 7 a 9 años): en adultos, hay que probarlo.
+- **Espaciado** 0-50 %: separación extra entre letras. Con niños con dislexia mejoró la lectura (Zorzi et al., PNAS
+  2012); en adultos sin dislexia, leyendo en silencio, no aumentó la velocidad (Korinth 2020, Perea 2016).
 - **Espejo**: refleja el texto en horizontal para el cristal de un teleprompter (los controles no se reflejan).
 - **Centrar líneas**: cada línea centrada a lo ancho en vez de alineada a la izquierda.
 - **Lectura al centro**: la línea de lectura pasa de un tercio a media altura (a la altura del objetivo de la
@@ -55,6 +78,7 @@ Solo necesita la interfaz (`requirements-teleprompter.txt`: PySide6-Essentials).
 | + / − (o Ctrl + rueda) | Letra más grande / más pequeña |
 | M | Espejo |
 | C | Centrar líneas |
+| F | Líneas por frases |
 | L / Mayús+L | Siguiente / anterior tipo de letra |
 | F11 / Esc | Pantalla completa / salir |
 | Ctrl+O / Ctrl+E | Abrir archivo / editar texto |

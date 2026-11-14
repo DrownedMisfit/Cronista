@@ -15,12 +15,18 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QGuiApplication, QImage
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QWidget
 
+from cronista.teleprompter import gramatica
 from cronista.teleprompter.fonts import DEFAULT_FAMILY
 from cronista.teleprompter.text import (ANGLE_MAX, ANGLE_MIN, FONT_MAX, FONT_MIN, GUIDE_CENTER_FRACTION,
                                         GUIDE_FRACTION, MARGIN_MAX, MARGIN_MIN, SPACING_MAX, SPACING_MIN, SPEED_MAX,
-                                        SPEED_MIN, VIEW_DISTANCE, clamp, speed_to_px_per_s)
+                                        SPEED_MIN, VIEW_DISTANCE, PHRASE_MAX_CHARS, clamp, phrase_breaks,
+                                        speed_to_px_per_s)
 
 log = logging.getLogger(__name__)
+
+PHRASE_CAP_MIN = 24            # líneas por frases: caracteres por línea, como mínimo y como máximo
+PHRASE_CAP_MAX = 70            # (aunque quepan más, una frase tan larga ya no se lee de un tirón)
+_MUESTRA = "el combate se siente pesado y cada disparo cuenta en la campaña "   # para medir el ancho medio de letra
 
 FONT_FAMILY = "Segoe UI"
 TEXT_COLOR = "#f2f2f2"
@@ -49,6 +55,7 @@ TRACK_HIT = 36.0               # ancho de la zona donde se puede pulsar o arrast
 MARK_ZONE_MIN = 70.0           # ancho mínimo del margen izquierdo donde un clic pone o quita una bandera
 GHOST_ALPHA = 90               # bandera tenue al pasar el ratón por el margen (clic = ponerla)
 _END_EPS = 0.01                # px de tolerancia para dar por alcanzado el final
+FOLLOW_TAU_S = 0.35            # modo Smart: cuánto tarda (constante de tiempo) en llegar a la línea que dices
 # Caché del texto ya pintado. Por encima de ~64 px Qt dibuja cada letra como un contorno: a 56 pt y 1080p eso
 # costaba ~10 ms por fotograma. Ahora el texto se pinta en una imagen de dos pantallas de alto que cada
 # fotograma solo copia (<1 ms); se vuelve a pintar tras avanzar unas tres cuartas partes de pantalla.
@@ -66,6 +73,12 @@ class _PrompterLogic:
 
     def _init_prompter(self) -> None:
         self._text = ""
+        self._phrase_breaks = False   # mostrar las líneas cortadas por frases
+        self._phrase_cap = PHRASE_MAX_CHARS   # caracteres que caben en una línea (se ajusta al maquetar)
+        self._grammar_worker = None           # análisis gramatical: dónde haría una pausa una persona
+        self._grammar_costs: dict | None = None
+        self._grammar_text: str | None = None     # texto al que corresponde ese análisis
+        self._grammar_pending: str | None = None  # texto que se está analizando
         self._font_size = 56
         self._font_family = DEFAULT_FAMILY   # letra del texto: la ventana elige una de las instaladas
         self._letter_spacing = 0             # % extra entre letras (0 = normal)
@@ -77,6 +90,10 @@ class _PrompterLogic:
         self._offset = 0.0            # px que ha subido el texto
         self._playing = False
         self._wheel_font_acc = 0.0    # fracción de muesca acumulada con Ctrl + rueda (touchpads)
+        # Modo Smart: en vez de subir a velocidad fija, el texto va (suave) a la línea que la voz acaba de decir
+        self._follow = False
+        self._follow_target = 0.0
+        self.on_manual_move = None    # modo Smart: la ventana se entera de que el usuario movió el texto a mano
 
         self._doc = QTextDocument(self)
         self._doc.setDocumentMargin(0)
@@ -131,15 +148,67 @@ class _PrompterLogic:
         """Cambia el texto. Se pausa, vuelve al principio y quita las banderas (ya no apuntarían al mismo sitio)."""
         self.pause()
         self._text = text
-        self._doc.setPlainText(text)
+        self._doc.setPlainText(self._display_text())
         self._offset = 0.0
+        self._follow_target = 0.0
         self._hover_mark = -1
         self._layout_doc()
         self.clear_marks()
         self._after_move()
+        self._request_grammar()
 
     def text(self) -> str:
         return self._text
+
+    def _display_text(self) -> str:
+        if not self._phrase_breaks:
+            return self._text
+        costes = self._grammar_costs if self._grammar_text == self._text else None
+        return phrase_breaks(self._text, self._phrase_cap, costes)
+
+    def _request_grammar(self) -> None:
+        """Pide el análisis gramatical (en otro hilo) del texto actual; mientras llega se usan las reglas."""
+        if (not self._phrase_breaks or not gramatica.enabled or not self._text.strip()
+                or self._text in (self._grammar_text, self._grammar_pending)):
+            return
+        if self._grammar_worker is None:
+            self._grammar_worker = gramatica.GrammarAnalyzer(self)
+            self._grammar_worker.ready.connect(self._on_grammar, Qt.ConnectionType.QueuedConnection)
+        self._grammar_pending = self._text
+        self._grammar_worker.analyze(self._text)
+
+    def _on_grammar(self, text: str, costes: dict) -> None:
+        """Llegó el análisis: se vuelven a cortar las líneas sin mover la frase que se está leyendo."""
+        self._grammar_pending = None
+        if text == self._text:
+            self._grammar_text, self._grammar_costs = text, costes
+            if self._phrase_breaks:
+                self._reapply_text()
+
+    def _chars_per_line(self) -> int:
+        """Caracteres de texto normal que caben en una línea con la letra y el ancho actuales (con un margen)."""
+        por_letra = QFontMetricsF(self._font).horizontalAdvance(_MUESTRA) / len(_MUESTRA)
+        return int(clamp(0.95 * self._text_width / max(por_letra, 1.0), PHRASE_CAP_MIN, PHRASE_CAP_MAX))
+
+    def set_phrase_breaks(self, on: bool) -> None:
+        """Corta las líneas por frases. Solo cambia cómo se muestra: la misma frase sigue en la línea de lectura."""
+        if bool(on) == self._phrase_breaks:
+            return
+        self._phrase_breaks = bool(on)
+        self._reapply_text()
+        self._request_grammar()
+
+    def _reapply_text(self) -> None:
+        """Vuelve a poner el texto con los cortes actuales, con la misma frase en la línea de lectura."""
+        ancla = self._pos_at_y(self._offset + self._line_h / 2) if self._text.strip() else 0
+        self._doc.setPlainText(self._display_text())
+        self._layout_doc()
+        self._offset = clamp(self._line_top(ancla), 0.0, self.max_offset()) if self._text.strip() else 0.0
+        self._follow_target = self._offset
+        self._after_move()
+
+    def has_phrase_breaks(self) -> bool:
+        return self._phrase_breaks
 
     def set_font_size(self, pt: int) -> None:
         pt = int(clamp(int(pt), FONT_MIN, FONT_MAX))
@@ -291,6 +360,7 @@ class _PrompterLogic:
         self.pause()
         self._offset = 0.0
         self._after_move()
+        self._manual_moved()
 
     def is_playing(self) -> bool:
         return self._playing
@@ -300,12 +370,48 @@ class _PrompterLogic:
         if not self._playing or dt_s <= 0:
             return
         top = self.max_offset()
-        self._offset = min(self._offset + speed_to_px_per_s(self._speed, self._line_h) * dt_s, top)
+        if self._follow:                   # modo Smart: se acerca (suave) a la línea dicha
+            meta = clamp(self._follow_target, 0.0, top)
+            falta = meta - self._offset
+            if abs(falta) <= 0.05:
+                return
+            paso = falta * (1.0 - math.exp(-dt_s / FOLLOW_TAU_S))
+            paso = max(paso, 0.05) if falta > 0 else min(paso, -0.05)
+            self._offset = min(self._offset + paso, meta) if falta > 0 else max(self._offset + paso, meta)
+        else:
+            self._offset = min(self._offset + speed_to_px_per_s(self._speed, self._line_h) * dt_s, top)
         self._after_move()
         if self._offset >= top - _END_EPS:
             self._stop()
             self.clear_pause_mark()        # texto terminado: ya no hay dónde continuar (las del usuario se quedan)
             self.finished.emit()
+
+    # ---- modo Smart (el texto sigue la voz) ---------------------------------
+    def set_follow(self, on: bool) -> None:
+        """Modo Smart: mientras se lee, el texto no sube a velocidad fija sino que va a donde diga follow_to()."""
+        self._follow = bool(on)
+        self._follow_target = self._offset
+
+    def is_following(self) -> bool:
+        return self._follow
+
+    def follow_to(self, pos: int, back: bool = False) -> None:
+        """La voz acaba de decir la palabra que acaba en pos: su línea va (suave) a la línea de lectura.
+        Solo hacia adelante, salvo back=True (la voz se encontró con seguridad más atrás: empezó en otra parte)."""
+        if not self._text.strip() or pos < 0:
+            return
+        meta = clamp(self._line_top(pos), 0.0, self.max_offset())
+        self._follow_target = meta if back else max(self._follow_target, meta)
+
+    def _manual_moved(self) -> None:
+        """El usuario movió el texto (rueda, barra, teclas, bandera): el modo Smart sigue desde ahí."""
+        self._follow_target = self._offset
+        if self.on_manual_move is not None:
+            self.on_manual_move()
+
+    def reading_pos(self) -> int:
+        """Posición del texto al principio de la línea que está en la línea de lectura."""
+        return self._pos_at_y(self._offset + self._line_h / 2) if self._text.strip() else 0
 
     def _stop(self) -> None:
         self._playing = False
@@ -383,11 +489,13 @@ class _PrompterLogic:
         """Desplaza n líneas (negativo = hacia atrás). Siempre dentro de [0, max_offset]."""
         self._offset = clamp(self._offset + n * self._line_h, 0.0, self.max_offset())
         self._after_move()
+        self._manual_moved()
 
     def seek(self, fraction: float) -> None:
         """Salta a una proporción del texto (0 = principio, 1 = final). Si estaba leyendo, sigue leyendo."""
         self._offset = clamp(fraction, 0.0, 1.0) * self.max_offset()
         self._after_move()
+        self._manual_moved()
 
     # ---- banderas (marcas) --------------------------------------------------
     def marks(self) -> list[int]:
@@ -451,6 +559,7 @@ class _PrompterLogic:
         self.pause()
         self._offset = clamp(self._line_top(pos), 0.0, self.max_offset())
         self._after_move()
+        self._manual_moved()
 
     def jump_to_next_mark(self) -> None:
         """Va a la siguiente bandera por debajo de la línea de lectura; tras la última, vuelve a la primera."""
@@ -586,6 +695,11 @@ class _PrompterLogic:
         self._margin_px = self.width() * self._margin_pct / 100.0
         self._text_width = max(MIN_TEXT_WIDTH, self.width() * (1 - 2 * self._margin_pct / 100.0))
         self._doc.setDefaultFont(self._font)
+        if self._phrase_breaks:                # los trozos se parten según lo que quepa con esta letra y este ancho
+            tope = self._chars_per_line()
+            if tope != self._phrase_cap:
+                self._phrase_cap = tope
+                self._doc.setPlainText(self._display_text())
         self._format_doc()
         self._doc.setTextWidth(self._text_width)
         self._doc_height = self._doc.size().height() if self._text.strip() else 0.0
@@ -619,6 +733,7 @@ class _PrompterLogic:
         dentro = clamp((self._offset - self._line_top(ancla)) / self._line_h, 0.0, 1.0)   # cuánto de esa línea
         self._layout_doc()
         self._offset = clamp(self._line_top(ancla) + dentro * self._line_h, 0.0, self.max_offset())
+        self._follow_target = self._offset        # (en píxeles ya no valía; la voz lo vuelve a fijar)
         self._after_move()
 
     def _after_move(self) -> None:

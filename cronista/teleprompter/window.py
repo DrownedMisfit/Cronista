@@ -10,8 +10,8 @@ import zlib
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import (QCloseEvent, QCursor, QDragEnterEvent, QDropEvent, QFont, QKeySequence, QMouseEvent,
-                           QShortcut, QShowEvent, QTextCursor)
+from PySide6.QtGui import (QCloseEvent, QCursor, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QKeySequence,
+                           QMouseEvent, QShortcut, QShowEvent, QTextCursor)
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QSlider, QSpinBox, QStackedWidget, QVBoxLayout,
                                QWidget)
@@ -38,7 +38,9 @@ SETTINGS_SAVE_MS = 800     # los ajustes se guardan tras una pausa, no en cada p
 TEXT_SAVE_MS = 1000
 FONT_STEP = 4              # puntos por pulsación de + / -
 LINE_STEP = 3              # líneas por pulsación de RePág / AvPág
+ANCHO_INICIAL = 1500       # px: lo que piden las tres filas de la barra de controles
 FPS_OPCIONES = ((0, "Automático"), (60, "60 fps"), (120, "120 fps"), (144, "144 fps"), (240, "240 fps"))
+CUENTA_OPCIONES = ((0, "Sin cuenta atrás"), (3, "3 s"), (5, "5 s"))
 
 
 def _boton(texto: str, ayuda: str, checkable: bool = False) -> QPushButton:
@@ -65,6 +67,16 @@ def _texto_angulo(grados: int) -> str:
     return "0° (de frente)"
 
 
+def formato_tiempo(segundos: float) -> str:
+    """m:ss, o h:mm:ss si pasa de una hora."""
+    total = max(0, int(round(segundos)))
+    horas, resto = divmod(total, 3600)
+    minutos, seg = divmod(resto, 60)
+    if horas:
+        return f"{horas}:{minutos:02d}:{seg:02d}"
+    return f"{minutos}:{seg:02d}"
+
+
 class _EtiquetaDobleClic(QLabel):
     """Etiqueta que avisa del doble clic (el del ángulo vuelve a 0°)."""
 
@@ -82,18 +94,20 @@ class _Canvas(QWidget):
     así, al ocultarla en pantalla completa, el texto y la línea de lectura no se mueven.
     """
 
-    def __init__(self, stack: QWidget, bar: QWidget, aviso: QWidget) -> None:
+    def __init__(self, stack: QWidget, bar: QWidget, aviso: QWidget, cuenta: QWidget) -> None:
         super().__init__()
         self._stack = stack
         self._bar = bar
         self._aviso = aviso
+        self._cuenta = cuenta
         self._reserve_bar = False
         self.on_place = None          # callable(alto_barra): la ventana avisa a la vista del hueco que tapa la barra
-        for hijo in (stack, bar, aviso):
+        for hijo in (stack, bar, aviso, cuenta):
             hijo.setParent(self)    # setParent oculta el widget: hay que volver a mostrarlo
         stack.show()
         bar.show()
         aviso.hide()
+        cuenta.hide()
         self.setMouseTracking(True)
         self.place()
 
@@ -117,6 +131,10 @@ class _Canvas(QWidget):
         self._aviso.move((ancho - self._aviso.width()) // 2, 16)
         self._aviso.raise_()
         self._bar.raise_()
+        # La cuenta atrás va centrada sobre el texto (en el hueco de la vista, sin contar la barra al editar)
+        self._cuenta.adjustSize()
+        self._cuenta.move((ancho - self._cuenta.width()) // 2, (alto - reserva - self._cuenta.height()) // 2)
+        self._cuenta.raise_()
 
 
 class TeleprompterWindow(QMainWindow):
@@ -133,7 +151,9 @@ class TeleprompterWindow(QMainWindow):
         self._reanclar_marca = False       # True tras restaurar la bandera al arrancar (se ancla al mostrarse)
 
         self.setWindowTitle(f"{APP_NAME} {__version__} — Teleprompter")
-        self.resize(1240, 720)
+        pantalla = QGuiApplication.primaryScreen()
+        disponible = pantalla.availableGeometry().width() if pantalla is not None else ANCHO_INICIAL
+        self.resize(min(ANCHO_INICIAL, disponible), 720)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
 
@@ -143,6 +163,13 @@ class TeleprompterWindow(QMainWindow):
         self._timer_aviso = self._un_disparo(HINT_MS, lambda: self._aviso.hide())
         self._timer_fps = QTimer(self)          # refresca la cifra de fps cada segundo, solo mientras se lee
         self._timer_fps.setInterval(1000)
+        self._cuenta_timer = QTimer(self)       # cuenta atrás: un paso por segundo
+        self._cuenta_timer.setInterval(1000)
+        self._cuenta_timer.timeout.connect(self._tick_cuenta)
+        self._cuenta_restante = 0
+        self._timer_tiempo = QTimer(self)       # indicador de tiempo: se refresca solo mientras la ventana se ve
+        self._timer_tiempo.setInterval(500)
+        self._timer_tiempo.timeout.connect(self._actualizar_tiempo)
 
         fonts.load_bundled_fonts()          # antes de crear la vista y el desplegable: las letras de fonts/
         self._view = create_view(self._tp.use_gpu)   # tarjeta gráfica si hay OpenGL; si no, el procesador
@@ -163,7 +190,13 @@ class TeleprompterWindow(QMainWindow):
         self._aviso.setStyleSheet("QLabel { background: rgba(0, 0, 0, 170); color: #f2f2f2; "
                                   "padding: 10px 16px; border-radius: 8px; font-size: 12pt; }")
         self._aviso.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._canvas = _Canvas(self._stack, self._bar, self._aviso)
+        self._cuenta_label = QLabel()          # número grande de la cuenta atrás, encima del texto
+        self._cuenta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cuenta_label.setStyleSheet("QLabel { background: rgba(0, 0, 0, 150); color: #ffffff; "
+                                         "font-size: 150pt; font-weight: bold; padding: 4px 56px; "
+                                         "border-radius: 28px; }")
+        self._cuenta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._canvas = _Canvas(self._stack, self._bar, self._aviso, self._cuenta_label)
         self.setCentralWidget(self._canvas)
         self._canvas.on_place = self._view.set_bottom_inset     # la vista deja libre el hueco de la barra
         self._canvas.place()
@@ -176,6 +209,7 @@ class TeleprompterWindow(QMainWindow):
         self._view.set_speed(self._tp.speed)
         self._view.set_mirror(self._tp.mirror)
         self._view.set_centered(self._tp.center_text)
+        self._view.set_phrase_breaks(self._tp.phrase_breaks)
         self._view.set_guide_centered(self._tp.guide_center)
         self._view.set_margin_pct(self._tp.margin_pct)
         familia = fonts.resolve_family(self._tp.font_family)
@@ -191,6 +225,7 @@ class TeleprompterWindow(QMainWindow):
         self._lbl_velocidad.setText(str(self._view.speed()))
         self._btn_espejo.setChecked(self._view.is_mirrored())
         self._btn_centrar.setChecked(self._view.is_centered())
+        self._btn_frases.setChecked(self._view.has_phrase_breaks())
         self._btn_guia.setChecked(self._view.is_guide_centered())
         self._view.set_fps(self._tp.fps)
         self._tp.fps = self._view.fps()
@@ -200,6 +235,12 @@ class TeleprompterWindow(QMainWindow):
             indice = self._combo_fps.count() - 1
         self._combo_fps.setCurrentIndex(indice)
         self._actualizar_fps()
+        self._tp.countdown_s = max(0, int(self._tp.countdown_s))
+        indice = self._combo_cuenta.findData(self._tp.countdown_s)
+        if indice < 0:                       # un valor guardado que no está en la lista: se añade tal cual
+            self._combo_cuenta.addItem(f"{self._tp.countdown_s} s", self._tp.countdown_s)
+            indice = self._combo_cuenta.count() - 1
+        self._combo_cuenta.setCurrentIndex(indice)
         self._view.set_view_angle(self._tp.view_angle)
         self._tp.view_angle = self._view.view_angle()
         self._slider_angulo.setValue(self._view.view_angle())
@@ -225,7 +266,23 @@ class TeleprompterWindow(QMainWindow):
         self._editing = not texto.strip()     # sin texto, arranca en la página de edición
         self._apply_editing_state()
 
+        self._follower = None             # modo Smart: dónde va la voz en el guion
+        self._follower_text = ""
+        self._oyente = None               # VoiceListener (micrófono + Vosk), solo mientras se lee
+        self._descarga = None
+        self._camara_geo = None           # geometría normal, para volver del modo cámara
+        self._view.on_manual_move = self._smart_reubicar
+        self._oido_ultimo = 0.0            # cuándo llegó voz por última vez (para avisar «no te oigo»)
+        self._oido_palabras = ""
+        self._llenar_micros()
         self._connect()
+        if self._tp.smart:                # se recuerda; si falta el modelo, al pulsar Iniciar se ofrece bajarlo
+            self._btn_smart.blockSignals(True)
+            self._btn_smart.setChecked(True)
+            self._btn_smart.blockSignals(False)
+            self._view.set_follow(True)
+            self._lbl_oido.setVisible(True)
+            self._lbl_oido.setText("🎙 pulsa Iniciar y lee en voz alta")
         self._actualizar_boton_borrar()
         self._install_shortcuts()
 
@@ -258,8 +315,9 @@ class TeleprompterWindow(QMainWindow):
                                              "También puedes arrastrarlo a la ventana.")
         self._btn_borrar = _boton("🗑 Borrar texto", "Borra todo el texto para escribir o pegar otro "
                                                     "(pide confirmación).")
-        self._btn_play = _boton("▶ Iniciar", "Iniciar o pausar (Espacio). Al pausar queda una bandera roja donde "
-                                             "paraste y Cronista la recuerda para la próxima vez.")
+        self._btn_play = _boton("▶ Iniciar", "Iniciar o pausar (Espacio). Al iniciar hay una cuenta atrás (ajuste "
+                                             "«Cuenta atrás»); pulsar otra vez durante ella la cancela. Al pausar queda "
+                                             "una bandera roja donde paraste y Cronista la recuerda para la próxima vez.")
         self._btn_play.setObjectName("primary")
         self._btn_inicio = _boton("⏮ Al principio", "Volver al principio del texto (Inicio)")
         self._btn_marca = _boton("🚩 Ir a la marca", "Va a la siguiente bandera roja (B). "
@@ -274,9 +332,19 @@ class TeleprompterWindow(QMainWindow):
         self._slider.setToolTip("Velocidad del desplazamiento (flecha arriba: más rápido; abajo: más lento)")
         self._lbl_velocidad = QLabel()
         self._lbl_velocidad.setToolTip("Velocidad actual (1 a 30)")
+        self._lbl_tiempo = QLabel("⏱ —")
+        self._lbl_tiempo.setMinimumWidth(230)
+        self._lbl_tiempo.setToolTip("Tiempo leído / duración total del texto a esta velocidad, y lo que falta")
+        self._combo_cuenta = QComboBox()
+        self._combo_cuenta.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for segundos, nombre in CUENTA_OPCIONES:
+            self._combo_cuenta.addItem(nombre, segundos)
+        self._combo_cuenta.setToolTip("Cuenta atrás antes de empezar a leer (al pulsar Iniciar o Espacio). "
+                                      "Pulsar otra vez durante la cuenta la cancela. Pausar es inmediato.")
 
         self._combo_fuente = QComboBox()
         self._combo_fuente.setMinimumWidth(220)
+        self._combo_fuente.setMaxVisibleItems(len(fonts.FONT_OPTIONS))     # que se vean todas sin desplazar la lista
         self._combo_fuente.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # los atajos (L) siguen en la vista
         self._combo_fuente.setToolTip("Tipo de letra del texto (L: siguiente, Mayús+L: anterior)")
         for opt in fonts.available_options():
@@ -295,14 +363,17 @@ class TeleprompterWindow(QMainWindow):
         self._spin_espaciado.setRange(SPACING_MIN, SPACING_MAX)
         self._spin_espaciado.setSingleStep(SPACING_STEP)
         self._spin_espaciado.setSuffix(" %")
-        self._spin_espaciado.setToolTip("Separación extra entre letras. "
-                                        "Separarlas ayuda a que no se amontonen al leer.")
+        self._spin_espaciado.setToolTip("Separación extra entre letras. A algunas personas les resulta más cómoda: "
+                                        "pruébala.")
 
         self._btn_espejo = _boton("⇋ Espejo", "Refleja el texto en horizontal para el cristal del "
                                               "teleprompter (M)", checkable=True)
         self._btn_centrar = _boton("↔ Centrar líneas", "Centra cada línea a lo ancho de la pantalla (C)",
                                    checkable=True)
-        self._btn_guia = _boton("↕ Lectura al centro", "Pone la línea de lectura a media altura de la pantalla, a la "
+        self._btn_frases = _boton("✂ Líneas por frases", "Corta las líneas al terminar cada frase y en las comas, para "
+                                                         "leer en voz alta con pausas naturales. Solo cambia cómo se "
+                                                         "ve: tu texto no se modifica (F)", checkable=True)
+        self._btn_guia = _boton("↕ Lectura al centro","Pone la línea de lectura a media altura de la pantalla, a la "
                                                        "altura del objetivo de la cámara si usas el cristal",
                                 checkable=True)
         self._btn_barra = _boton("▮ Barra de avance", "Muestra a la derecha por dónde vas del texto. "
@@ -333,21 +404,43 @@ class TeleprompterWindow(QMainWindow):
         self._lbl_angulo.setToolTip(ayuda_angulo)
         self._btn_pantalla = _boton("⛶ Pantalla completa", "Pantalla completa (F11). En pantalla completa, "
                                                            "Esc sale.")
+        self._btn_smart = _boton("🎙 Smart", "Modo Smart: el texto sigue tu voz. Avanza mientras lees en voz alta y "
+                                            "se para si te callas o improvisas. Todo en tu PC, sin internet (la "
+                                            "primera vez baja un modelo de voz de unos 40 MB).", checkable=True)
+        self._btn_camara = _boton("📷 Junto a la cámara", "Convierte la ventana en una franja siempre encima, arriba "
+                                                         "de la pantalla, bajo la webcam: lees mirando casi al lente. "
+                                                         "Arrastra la barra para moverla y la esquina para cambiar su "
+                                                         "tamaño. K o Esc: volver.", checkable=True)
+        self._lbl_oido = QLabel()
+        self._lbl_oido.setMinimumWidth(260)
+        self._lbl_oido.setToolTip("Modo Smart: el volumen que llega del micrófono y las últimas palabras que entendí. "
+                                  "Si no se mueve al hablar, elige otro micrófono en «Micrófono».")
+        self._lbl_oido.hide()
+        self._combo_mic = QComboBox()
+        self._combo_mic.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._combo_mic.setToolTip("Micrófono que escucha el modo Smart")
+        self._combo_mic.addItem("Predeterminado de Windows", "")
+        from PySide6.QtWidgets import QSizeGrip
+        self._grip = QSizeGrip(self._bar)
+        self._grip.setToolTip("Arrastra para cambiar el tamaño de la franja")
+        self._grip.hide()
         self._lbl_progreso = QLabel("0 %")
         self._lbl_progreso.setToolTip("Progreso de la lectura")
 
         for w in (self._btn_editar, self._btn_abrir, self._btn_borrar, _separador(), self._btn_play,
-                  self._btn_inicio, self._btn_marca, self._btn_quitar_marcas, _separador(), QLabel("Velocidad"),
-                  self._slider, self._lbl_velocidad):
+                  self._btn_smart, self._lbl_oido, self._btn_inicio, self._btn_marca, self._btn_quitar_marcas, _separador(),
+                  QLabel("Velocidad"),
+                  self._slider, self._lbl_velocidad, self._lbl_tiempo):
             fila.addWidget(w)
         fila.addStretch(1)
         fila.addWidget(self._lbl_progreso)
         for w in (QLabel("Tipo de letra"), self._combo_fuente, QLabel("Tamaño"), self._spin,
                   QLabel("Espaciado"), self._spin_espaciado, _separador(), QLabel("Fluidez"), self._combo_fps,
-                  self._lbl_fps):
+                  self._lbl_fps, _separador(), QLabel("Cuenta atrás"), self._combo_cuenta, _separador(),
+                  QLabel("Micrófono"), self._combo_mic):
             aspecto.addWidget(w)
         aspecto.addStretch(1)
-        for w in (self._btn_espejo, self._btn_centrar, self._btn_guia, self._btn_barra, _separador(),
+        for w in (self._btn_espejo, self._btn_centrar, self._btn_frases, self._btn_guia, self._btn_barra, _separador(),
                   QLabel("Ángulo de visión"), self._slider_angulo, self._lbl_angulo):
             vista.addWidget(w)
         vista.addStretch(1)
@@ -359,7 +452,9 @@ class TeleprompterWindow(QMainWindow):
             from PySide6.QtGui import QDesktopServices
             b_apoyo.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(SUPPORT_URL)))
             vista.addWidget(b_apoyo)
+        vista.addWidget(self._btn_camara)
         vista.addWidget(self._btn_pantalla)
+        vista.addWidget(self._grip, 0, Qt.AlignmentFlag.AlignBottom)
         capas.addLayout(fila)
         capas.addLayout(aspecto)
         capas.addLayout(vista)
@@ -367,8 +462,12 @@ class TeleprompterWindow(QMainWindow):
     def _connect(self) -> None:
         self._btn_editar.toggled.connect(self._set_editing)
         self._btn_abrir.clicked.connect(lambda: self._abrir_dialogo())
-        self._btn_play.clicked.connect(lambda: self._view.toggle())
-        self._btn_inicio.clicked.connect(lambda: self._view.rewind())
+        self._btn_play.clicked.connect(lambda: self._pulsar_play())
+        self._btn_inicio.clicked.connect(lambda: self._rebobinar())
+        self._combo_cuenta.currentIndexChanged.connect(self._on_cuenta)
+        self._btn_smart.toggled.connect(self._on_smart)
+        self._combo_mic.currentIndexChanged.connect(self._on_mic)
+        self._btn_camara.toggled.connect(self._on_camara)
         self._btn_marca.clicked.connect(lambda: self._ir_a_marca())
         self._btn_quitar_marcas.clicked.connect(lambda: self._quitar_marcas())
         self._btn_borrar.clicked.connect(lambda: self._borrar_texto())
@@ -380,6 +479,7 @@ class TeleprompterWindow(QMainWindow):
         self._spin_espaciado.editingFinished.connect(lambda: self._devolver_foco())
         self._btn_espejo.toggled.connect(self._on_espejo)
         self._btn_centrar.toggled.connect(self._on_centrar)
+        self._btn_frases.toggled.connect(self._on_frases)
         self._btn_guia.toggled.connect(self._on_guia)
         self._btn_barra.toggled.connect(self._on_barra_avance)
         self._slider_angulo.valueChanged.connect(self._on_angulo)
@@ -400,8 +500,8 @@ class TeleprompterWindow(QMainWindow):
         """Atajos de lectura: su padre es la vista y el contexto exige que la vista (o un hijo) tenga el foco.
         Así, en la página de edición (la vista está oculta) la barra espaciadora escribe espacios."""
         lectura = [
-            ("Space", self._view.toggle),
-            ("Home", self._view.rewind),
+            ("Space", self._pulsar_play),
+            ("Home", self._rebobinar),
             ("B", lambda: self._ir_a_marca()),
             ("Up", lambda: self._slider.setValue(self._slider.value() + 1)),
             ("Down", lambda: self._slider.setValue(self._slider.value() - 1)),
@@ -414,12 +514,14 @@ class TeleprompterWindow(QMainWindow):
             ("Ctrl+-", lambda: self._bump_letra(-FONT_STEP)),
             ("M", lambda: self._btn_espejo.toggle()),
             ("C", lambda: self._btn_centrar.toggle()),
+            ("F", lambda: self._btn_frases.toggle()),
             ("L", lambda: self._cycle_font(1)),
             ("Shift+L", lambda: self._cycle_font(-1)),
         ]
         globales = [
             ("F11", lambda: self._alternar_pantalla()),
             ("Esc", lambda: self._salir_pantalla_completa()),
+            ("K", lambda: self._btn_camara.toggle()),
             ("Ctrl+O", lambda: self._abrir_dialogo()),
             ("Ctrl+E", lambda: self._btn_editar.toggle()),
         ]
@@ -439,6 +541,7 @@ class TeleprompterWindow(QMainWindow):
         if on == self._editing:
             return
         if on:
+            self._cancelar_cuenta()
             self._view.pause()
             self._editing = True
             self._apply_editing_state()
@@ -460,6 +563,8 @@ class TeleprompterWindow(QMainWindow):
         self._btn_inicio.setEnabled(not self._editing)
         self._actualizar_botones_marcas()
         self._canvas.set_reserve_bar(self._editing)
+        self._actualizar_boton_play()
+        self._actualizar_tiempo()
         self._aplicar_cromo()
 
     def _devolver_foco(self) -> None:
@@ -473,12 +578,19 @@ class TeleprompterWindow(QMainWindow):
         self._view.set_speed(valor)
         self._lbl_velocidad.setText(str(self._view.speed()))
         self._tp.speed = self._view.speed()
+        self._actualizar_tiempo()
         self._guardar_ajustes_pronto()
 
     def _on_letra(self, valor: int) -> None:
         self._view.set_font_size(valor)
         self._tp.font_size = self._view.font_size()
+        self._actualizar_tiempo()
         self._guardar_ajustes_pronto()
+
+    def _on_cuenta(self, indice: int) -> None:
+        self._tp.countdown_s = int(self._combo_cuenta.itemData(indice) or 0)
+        self._guardar_ajustes_pronto()
+        self._devolver_foco()
 
     def _on_letra_desde_vista(self, valor: int) -> None:
         """Ctrl + rueda en la vista: actualiza el control sin volver a aplicar el valor."""
@@ -486,6 +598,7 @@ class TeleprompterWindow(QMainWindow):
         self._spin.setValue(valor)
         self._spin.blockSignals(False)
         self._tp.font_size = valor
+        self._actualizar_tiempo()
         self._guardar_ajustes_pronto()
 
     def _on_fuente(self, indice: int) -> None:
@@ -496,6 +609,7 @@ class TeleprompterWindow(QMainWindow):
         self._view.set_font_family(familia)
         self._tp.font_family = self._view.font_family()
         self._estilo_combo_fuente(familia)
+        self._actualizar_tiempo()
         self._guardar_ajustes_pronto()
         self._devolver_foco()
 
@@ -517,6 +631,7 @@ class TeleprompterWindow(QMainWindow):
     def _on_espaciado(self, valor: int) -> None:
         self._view.set_letter_spacing(valor)
         self._tp.letter_spacing = self._view.letter_spacing()
+        self._actualizar_tiempo()
         self._guardar_ajustes_pronto()
 
     def _on_espejo(self, on: bool) -> None:
@@ -549,6 +664,11 @@ class TeleprompterWindow(QMainWindow):
         self._view.set_view_angle(grados)
         self._tp.view_angle = self._view.view_angle()
         self._lbl_angulo.setText(_texto_angulo(self._tp.view_angle))
+        self._guardar_ajustes_pronto()
+
+    def _on_frases(self, on: bool) -> None:
+        self._view.set_phrase_breaks(on)
+        self._tp.phrase_breaks = bool(on)
         self._guardar_ajustes_pronto()
 
     def _on_centrar(self, on: bool) -> None:
@@ -595,10 +715,99 @@ class TeleprompterWindow(QMainWindow):
             self.statusBar().showMessage("🚩 Marca puesta: la próxima vez seguirás desde aquí.", 5000)
 
     def _on_playing(self, playing: bool) -> None:
-        self._btn_play.setText("⏸ Pausar" if playing else "▶ Iniciar")
+        self._actualizar_boton_play()
+        if self._btn_smart.isChecked():
+            if playing:
+                self._smart_escuchar()
+            else:
+                self._smart_callar()
 
     def _on_progreso(self, p: float) -> None:
         self._lbl_progreso.setText(f"{round(p * 100)} %")
+        self._actualizar_tiempo()
+
+    # ---- inicio con cuenta atrás ---------------------------------------------
+    def start_reading(self) -> None:
+        """Empieza a leer. Con cuenta atrás (ajuste «Cuenta atrás») muestra 3, 2, 1 antes de mover el texto."""
+        if self._view.is_playing() or self.is_counting_down():
+            return
+        if self._btn_smart.isChecked() and not self._smart_listo():
+            return                       # (se ofrece bajar el modelo; al terminar, el usuario pulsa Iniciar)
+        segundos = int(self._tp.countdown_s)
+        if segundos <= 0:
+            self._view.play()
+            return
+        self._cuenta_restante = segundos
+        self._mostrar_cuenta()
+        self._cuenta_timer.start()
+        self._actualizar_boton_play()
+
+    def is_counting_down(self) -> bool:
+        return self._cuenta_timer.isActive()
+
+    def _pulsar_play(self) -> None:
+        """Botón Iniciar y Espacio: cancela la cuenta si está en marcha, pausa si se lee, y si no, empieza."""
+        if self.is_counting_down():
+            self._cancelar_cuenta()
+        elif self._view.is_playing():
+            self._view.toggle()          # pausa y deja la bandera roja
+        else:
+            self.start_reading()
+
+    def _tick_cuenta(self) -> None:
+        if not self.is_counting_down():      # tick que llega tras cancelar: no hace nada
+            return
+        self._cuenta_restante -= 1
+        if self._cuenta_restante > 0:
+            self._mostrar_cuenta()
+            return
+        self._cuenta_timer.stop()
+        self._cuenta_label.hide()
+        self._view.play()
+        self._actualizar_boton_play()
+
+    def _mostrar_cuenta(self) -> None:
+        self._cuenta_label.setText(str(self._cuenta_restante))
+        self._canvas.place()             # centra el número con su tamaño actual y lo deja encima
+        self._cuenta_label.show()
+
+    def _cancelar_cuenta(self) -> None:
+        if not self.is_counting_down():
+            return
+        self._cuenta_timer.stop()
+        self._cuenta_restante = 0
+        self._cuenta_label.hide()
+        self._actualizar_boton_play()
+
+    def _rebobinar(self) -> None:
+        self._cancelar_cuenta()
+        self._view.rewind()
+
+    def _actualizar_boton_play(self) -> None:
+        if self.is_counting_down():
+            texto = "✕ Cancelar"
+        elif self._view.is_playing():
+            texto = "⏸ Pausar"
+        else:
+            texto = "▶ Iniciar"
+        self._btn_play.setText(texto)
+
+    # ---- indicador de tiempo -------------------------------------------------
+    def _actualizar_tiempo(self) -> None:
+        texto = self._texto_tiempo()
+        if self._lbl_tiempo.text() != texto:      # solo se toca la etiqueta si cambia
+            self._lbl_tiempo.setText(texto)
+
+    def _texto_tiempo(self) -> str:
+        """Tiempo leído / total a la velocidad actual, y lo que falta. Sin texto (o sin medida) muestra «—»."""
+        px_s = tp_text.speed_to_px_per_s(self._view.speed(), self._view.line_height())
+        if not self._view.text().strip() or px_s <= 0:
+            return "⏱ —"
+        transcurrido = self._view.offset() / px_s
+        total = self._view.max_offset() / px_s
+        falta = max(0.0, total - transcurrido)
+        return (f"⏱ {formato_tiempo(transcurrido)} / {formato_tiempo(total)} · "
+                f"faltan {formato_tiempo(falta)}")
 
     def _on_editor_changed(self) -> None:
         self._puede_guardar_texto = True
@@ -639,6 +848,7 @@ class TeleprompterWindow(QMainWindow):
         self._editor.setPlainText(texto)
         self._view.set_text(texto)
         self._puede_guardar_texto = True
+        self._actualizar_tiempo()
         self._set_editing(False)
         self._devolver_foco()
         self._tp.last_file = ruta
@@ -694,7 +904,9 @@ class TeleprompterWindow(QMainWindow):
             self.showFullScreen()
 
     def _salir_pantalla_completa(self) -> None:
-        if self.isFullScreen():
+        if self._btn_camara.isChecked():
+            self._btn_camara.setChecked(False)
+        elif self.isFullScreen():
             self.showNormal()
 
     def _on_estado_cambiado(self) -> None:
@@ -715,7 +927,7 @@ class TeleprompterWindow(QMainWindow):
     def _aplicar_cromo(self) -> None:
         """Pantalla completa leyendo: la barra y el cursor se ocultan tras IDLE_MS sin mover el ratón.
         En cualquier otro caso, todo visible."""
-        automatico = self.isFullScreen() and not self._editing
+        automatico = self._compacto() and not self._editing
         self._timer_ocultar.stop()
         self._bar.show()
         self._view.set_cursor_hidden(False)
@@ -723,20 +935,237 @@ class TeleprompterWindow(QMainWindow):
             self._timer_ocultar.start()
 
     def _actividad(self) -> None:
-        if not self.isFullScreen() or self._editing:
+        if not self._compacto() or self._editing:
             return
         self._bar.show()
         self._view.set_cursor_hidden(False)
         self._timer_ocultar.start()
 
     def _on_idle(self) -> None:
-        if not self.isFullScreen() or self._editing:
+        if not self._compacto() or self._editing:
             return
         if self._bar.rect().contains(self._bar.mapFromGlobal(QCursor.pos())):
             self._timer_ocultar.start()     # el ratón está encima de la barra: no se oculta
             return
         self._bar.hide()
         self._view.set_cursor_hidden(True)
+
+    def _compacto(self) -> bool:
+        """Pantalla completa o modo cámara: la barra y el cursor se esconden solos."""
+        return self.isFullScreen() or self._btn_camara.isChecked()
+
+    # ---- 📷 junto a la cámara ------------------------------------------------
+    def _on_camara(self, on: bool) -> None:
+        """Franja siempre encima, arriba y al centro de la pantalla (bajo la webcam), sin bordes."""
+        if on:
+            if self.isFullScreen():
+                self.showNormal()
+            self._camara_geo = self.geometry()
+            area = (self.screen() or self.windowHandle().screen()).availableGeometry()
+            ancho, alto = int(area.width() * 0.6), max(220, int(area.height() * 0.3))
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint
+                                | Qt.WindowType.WindowStaysOnTopHint)
+            self.setGeometry(area.x() + (area.width() - ancho) // 2, area.y(), ancho, alto)
+            self.statusBar().hide()
+            self._grip.show()
+            self.show()
+            self._btn_camara.setText("📷 Volver a la ventana")
+        else:
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.FramelessWindowHint
+                                & ~Qt.WindowType.WindowStaysOnTopHint)
+            self._grip.hide()
+            self.statusBar().show()
+            if self._camara_geo is not None:
+                self.setGeometry(self._camara_geo)
+            self.show()
+            self._btn_camara.setText("📷 Junto a la cámara")
+        self._aplicar_cromo()
+        self._canvas.place()
+        self._devolver_foco()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        # Sin bordes no hay barra de título: en modo cámara, arrastrar la barra de controles mueve la franja
+        if (self._btn_camara.isChecked() and event.button() == Qt.MouseButton.LeftButton
+                and self.windowHandle() is not None):
+            self.windowHandle().startSystemMove()
+            return
+        super().mousePressEvent(event)
+
+    # ---- 🎙 modo Smart (el texto sigue la voz) -------------------------------------
+    def _on_smart(self, on: bool) -> None:
+        """Encender o apagar Smart pausa la lectura: se vuelve a pulsar Iniciar (con o sin voz)."""
+        self._tp.smart = bool(on)
+        self._guardar_ajustes_pronto()
+        self._cancelar_cuenta()
+        if self._view.is_playing():
+            self._view.pause()
+        self._smart_callar()
+        self._view.set_follow(on)
+        self._lbl_oido.setVisible(on)
+        self._lbl_oido.setText("🎙 pulsa Iniciar y lee en voz alta" if on else "")
+        if on:
+            if not self._smart_listo():
+                return
+            self.statusBar().showMessage("🎙 Smart: pulsa Iniciar y lee en voz alta; el texto te sigue.", 6000)
+        else:
+            self.statusBar().showMessage("Smart apagado: pulsa Iniciar y el texto sube a la velocidad elegida.", 5000)
+        log.info("Smart %s", "encendido" if on else "apagado")
+        self._devolver_foco()
+
+    def _llenar_micros(self) -> None:
+        from cronista.teleprompter import smart
+        self._combo_mic.blockSignals(True)
+        for nombre in smart.input_devices():
+            self._combo_mic.addItem(nombre, nombre)
+        i = self._combo_mic.findData(self._tp.smart_mic)
+        self._combo_mic.setCurrentIndex(max(0, i))
+        self._combo_mic.blockSignals(False)
+        self._lbl_oido.setVisible(self._btn_smart.isChecked())
+        if self._btn_smart.isChecked():
+            self._lbl_oido.setText("🎙 pulsa Iniciar y lee en voz alta")
+
+    def _on_mic(self, _i: int) -> None:
+        self._tp.smart_mic = self._combo_mic.currentData() or ""
+        self._guardar_ajustes_pronto()
+        if self._oyente is not None and self._oyente.is_running():   # cambia en caliente
+            self._smart_callar()
+            self._smart_escuchar()
+        self._devolver_foco()
+
+    def _smart_nivel(self, nivel: float) -> None:
+        import time as _t
+        ahora = _t.monotonic()
+        if nivel > 0.02:
+            self._oido_ultimo = ahora
+        if not self._view.is_playing():
+            return
+        if ahora - self._oido_ultimo > 4.0:
+            self._lbl_oido.setText("🎙 no te oigo: revisa el micrófono")
+            return
+        barras = "▁▂▃▄▅▆▇█"
+        barra = barras[min(len(barras) - 1, int(nivel * 3 * len(barras)))]
+        self._lbl_oido.setText(f"🎙 {barra} {self._oido_palabras}")
+
+    def _smart_idioma(self) -> str:
+        from cronista.teleprompter import smart
+        return smart.guess_language(self._view.text())
+
+    def _smart_listo(self) -> bool:
+        """¿Está el modelo de voz del idioma del texto? Si no, ofrece bajarlo (una sola vez, ~40 MB)."""
+        from cronista.teleprompter import smart
+        idioma = self._smart_idioma()
+        if smart.model_path(idioma) is not None:
+            return True
+        if self._descarga is not None:
+            return False
+        nombre = "español" if idioma == "es" else "inglés"
+        r = QMessageBox.question(self, "Modo Smart",
+                                 f"Para seguir tu voz, Cronista necesita el modelo de voz en {nombre} "
+                                 "(unos 40 MB, se baja una sola vez y después funciona sin internet).\n\n"
+                                 "¿Lo bajo?")
+        if r != QMessageBox.StandardButton.Yes:
+            self._btn_smart.setChecked(False)
+            return False
+        self._smart_bajar(idioma)
+        return False
+
+    def _smart_bajar(self, idioma: str) -> None:
+        import threading
+        from PySide6.QtCore import QObject
+        from PySide6.QtWidgets import QProgressDialog
+        from cronista.teleprompter import smart
+
+        class _Avisos(QObject):
+            avance = Signal(int, int)
+            fin = Signal(str)
+
+        avisos = _Avisos(self)
+        dlg = QProgressDialog("Bajando el modelo de voz…", "Cancelar", 0, 100, self)
+        dlg.setWindowTitle("Modo Smart")
+        dlg.setMinimumDuration(0)
+        cancelado = threading.Event()
+        dlg.canceled.connect(cancelado.set)
+
+        def avance(hecho: int, total: int) -> None:
+            if total > 0:
+                dlg.setValue(int(hecho * 100 / total))
+                dlg.setLabelText(f"Bajando el modelo de voz… {hecho / 1e6:.0f} de {total / 1e6:.0f} MB")
+
+        def fin(error: str) -> None:
+            dlg.close()
+            self._descarga = None
+            if error:
+                self._btn_smart.setChecked(False)
+                if not cancelado.is_set():
+                    QMessageBox.warning(self, "Modo Smart", f"No se pudo bajar el modelo de voz:\n{error}")
+                return
+            self.statusBar().showMessage("✓ Modelo de voz listo. Pulsa Iniciar y lee en voz alta.", 8000)
+
+        avisos.avance.connect(avance)
+        avisos.fin.connect(fin)
+
+        def trabajo() -> None:
+            try:
+                smart.download_model(idioma, progress=lambda h, t: avisos.avance.emit(h, t),
+                                     cancelled=cancelado.is_set)
+                avisos.fin.emit("")
+            except Exception as exc:  # noqa: BLE001 - se le cuenta al usuario
+                avisos.fin.emit(str(exc) or exc.__class__.__name__)
+
+        self._descarga = threading.Thread(target=trabajo, daemon=True)
+        self._descarga.start()
+
+    def _smart_reubicar(self) -> None:
+        """El usuario movió el texto a mano: la voz sigue desde la línea de lectura."""
+        if self._follower is not None:
+            self._follower.reset(self._view.reading_pos())
+
+    def _smart_escuchar(self) -> None:
+        from cronista.teleprompter import smart
+        if self._oyente is not None and self._oyente.is_running():
+            return
+        texto = self._view.text()
+        if self._follower is None or self._follower_text != texto:
+            self._follower, self._follower_text = smart.ScriptFollower(texto), texto
+        self._follower.reset(self._view.reading_pos())
+        if self._oyente is None:
+            self._oyente = smart.VoiceListener(self)
+            self._oyente.heard.connect(self._smart_oido)
+            self._oyente.error.connect(self._smart_error)
+            self._oyente.level.connect(self._smart_nivel)
+        import time as _t
+        self._oido_ultimo = _t.monotonic()
+        self._oido_palabras = ""
+        idioma = self._smart_idioma()
+        mic = self._tp.smart_mic or None
+        log.info("Smart: escuchando (idioma %s, micrófono %s)", idioma, mic or "predeterminado")
+        self._oyente.start(idioma, mic)
+        self._lbl_oido.setText("🎙 escuchando…")
+        self.statusBar().showMessage("🎙 Escuchando… lee en voz alta.", 4000)
+
+    def _smart_callar(self) -> None:
+        if self._oyente is not None and self._oyente.is_running():
+            self._oyente.stop()
+            if self._btn_smart.isChecked():
+                self._lbl_oido.setText("🎙 en pausa")
+
+    def _smart_oido(self, palabras: list) -> None:
+        if self._follower is None or not self._view.is_playing():
+            return
+        self._oido_palabras = "«" + " ".join(str(p) for p in palabras[-4:]) + "»"
+        import time as _t
+        self._oido_ultimo = _t.monotonic()          # (si entiende palabras, el micrófono funciona)
+        self._lbl_oido.setText(f"🎙 {self._oido_palabras}")
+        pos = self._follower.feed([str(p) for p in palabras])
+        if pos is not None:
+            self._view.follow_to(pos, back=self._follower.jumped)
+
+    def _smart_error(self, mensaje: str) -> None:
+        log.warning("Smart: %s", mensaje)
+        self._lbl_oido.setText("🎙 ✗ " + mensaje[:60])
+        self._view.pause()
+        self.statusBar().showMessage(f"🎙 {mensaje}", 10000)
+        QMessageBox.warning(self, "Modo Smart", mensaje)
 
     # ---- eventos de ventana -------------------------------------------------
     def changeEvent(self, event: QEvent) -> None:
@@ -751,6 +1180,8 @@ class TeleprompterWindow(QMainWindow):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._canvas.place()        # al mostrarse, la barra ya tiene su alto definitivo (con la hoja del desplegable)
+        self._timer_tiempo.start()  # el indicador de tiempo se refresca mientras la ventana se ve
+        self._actualizar_tiempo()
         if self._reanclar_marca:
             # Al arrancar, el texto se maquetó con el ancho provisional de la vista: con otro ancho cambian las
             # líneas. Ahora que tiene su tamaño real, se vuelve a llevar la bandera a la línea de lectura.
@@ -758,7 +1189,14 @@ class TeleprompterWindow(QMainWindow):
             self._view.jump_to_mark(self._view.pause_mark())
         self._devolver_foco()
 
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer_tiempo.stop()
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._smart_callar()
+        self._cancelar_cuenta()
+        self._timer_tiempo.stop()
         if self._view.is_playing():
             self._view.pause()
             self._view.mark_pause_here()        # cerrar a mitad de lectura también deja la marca para la próxima vez

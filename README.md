@@ -15,7 +15,12 @@ Movimiento suave, letras muy legibles y banderas para retomar donde te quedaste.
 - **Abre tu guion** en `.txt`, `.md` o `.docx` (Word o Google Docs descargado), o pégalo directamente.
 - **Banderas rojas**: al pausar queda una marca donde paraste y la próxima vez sigue desde ahí. Puedes poner las
   tuyas con un clic en el margen.
-- **Letras pensadas para leer**: nueve tipos (Atkinson Hyperlegible, Lexend…), tamaño y espaciado ajustables.
+- **🎙 Modo Smart**: el texto sigue tu voz (reconocimiento local con Vosk, sin internet al leer): si te paras, se
+  para contigo. El modelo de voz (~40 MB) se baja la primera vez.
+- **✂ Líneas por frases**: corta el guion donde una persona haría una pausa (análisis gramatical local con spaCy).
+- **⏱ Cuenta atrás** 3-2-1 y tiempo (llevas / dura / faltan), y **📷 Junto a la cámara**: una franja siempre encima,
+  cerca de la webcam.
+- **Letras pensadas para leer**: 19 tipos (Atkinson Hyperlegible, Lexend, Andika, B612…), tamaño y espaciado ajustables.
 - **Espejo** para el cristal de un teleprompter, **ángulo de visión** si miras la pantalla desde arriba o abajo,
   pantalla completa en el monitor que elijas y barra de avance.
 
@@ -25,6 +30,9 @@ Movimiento suave, letras muy legibles y banderas para retomar donde te quedaste.
 | ↑ / ↓ | Más / menos velocidad |
 | + / − | Letra más grande / más pequeña |
 | B | Ir a la siguiente bandera |
+| F | Líneas por frases |
+| K | Junto a la cámara |
+| L / Mayús+L | Siguiente / anterior tipo de letra |
 | M | Espejo |
 | F11 / Esc | Pantalla completa / salir |
 

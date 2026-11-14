@@ -1,4 +1,9 @@
 # Cronista como teleprompter (función principal desde la 0.2): solo hace falta la interfaz.
 # Para el asistente de notas por voz (`python -m cronista --notas`) instala además requirements.txt.
 PySide6-Essentials>=6.7
+vosk>=0.3.45               # modo Smart: reconocimiento de voz local (el modelo se baja al usarlo)
+sounddevice>=0.4.7         # modo Smart: micrófono
+spacy>=3.8                 # «Líneas por frases»: análisis gramatical local (si falta, Cronista usa reglas simples)
+es_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.8.0/es_core_news_sm-3.8.0-py3-none-any.whl
 pytest>=8                  # desarrollo
+pyinstaller>=6.0           # desarrollo: tools/construir_exe.py arma Cronista.exe

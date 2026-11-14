@@ -1,0 +1,37 @@
+CRONISTA - TELEPROMPTER
+=======================
+
+No hace falta instalar Python ni nada más.
+
+1. Descomprime el zip: clic derecho sobre el .zip > "Extraer todo".
+   No abras Cronista desde dentro del zip: así no podría guardar tus ajustes.
+
+2. Entra en la carpeta Cronista y haz doble clic en Cronista.exe.
+   Mantén juntos Cronista.exe, la carpeta _internal y la carpeta fonts.
+
+SI WINDOWS SMARTSCREEN AVISA
+   Puede aparecer "Windows protegió su PC". Pulsa "Más información" y luego
+   "Ejecutar de todas formas". Pasa porque el programa no tiene firma comercial.
+
+DÓNDE SE GUARDA TODO
+   - Tu texto, tus ajustes y el registro (logs): %APPDATA%\Cronista
+     (pega esa ruta en la barra de direcciones del Explorador de archivos).
+   - Para quitar Cronista del todo, borra la carpeta Cronista y esa carpeta de %APPDATA%.
+
+LO BÁSICO
+   - Espacio: iniciar / pausar (antes de empezar hay una cuenta atrás 3-2-1; se cambia en «Cuenta atrás»).
+   - Arriba se ve cuánto llevas, cuánto dura el texto a tu velocidad y cuánto falta.
+   - «Junto a la cámara» (o K): una franja siempre encima, arriba de la pantalla, bajo tu webcam.
+     Arrastra la barra para moverla y la esquina para cambiar su tamaño. Esc o K: volver.
+   - F o «Líneas por frases»: corta las líneas por frases, para leer en voz alta con pausas naturales.
+   - L: cambiar el tipo de letra mientras lees (hay varias para probar).
+
+MODO SMART (seguir la voz)
+   Con «Smart» encendido, el texto avanza mientras lees en voz alta y se para si te callas.
+   La primera vez que lo actives, Cronista baja un modelo de voz de unos 40 MB
+   (necesita internet solo esa vez). Se guarda en %APPDATA%\Cronista\modelos.
+   Todo se queda en tu PC: tu voz no se manda a ningún sitio.
+
+Las letras incluidas tienen licencias libres: ver la carpeta fonts (LICENCIAS.md).
+«Líneas por frases» usa spaCy (licencia MIT) y su modelo de español es_core_news_sm (GNU GPL 3.0).
+Licencia del programa: LICENSE.txt (GPL v3).

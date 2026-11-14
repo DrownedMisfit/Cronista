@@ -30,6 +30,8 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 def _appdata_temporal(tmp_path, monkeypatch):
     """Nunca escribir en el %APPDATA% real: los ajustes y el texto van a tmp_path."""
     monkeypatch.setenv("APPDATA", str(tmp_path))
+    from cronista.teleprompter import gramatica
+    monkeypatch.setattr(gramatica, "enabled", False)     # no cargar el modelo en cada vista
 
 
 @pytest.fixture(scope="session")
@@ -387,7 +389,9 @@ def test_ajustes_guardados_se_aplican_al_arrancar(qapp, tmp_path):
 def test_espacio_inicia_y_pausa_la_lectura(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w = TeleprompterWindow(Settings(), text_path=ruta)
+    ajustes = Settings()
+    ajustes.teleprompter.countdown_s = 0    # sin cuenta atrás: esta prueba mira solo Espacio y la pausa
+    w = TeleprompterWindow(ajustes, text_path=ruta)
     w.show()
     w.activateWindow()
     QTest.qWaitForWindowActive(w)   # los atajos solo se disparan con la ventana activa
@@ -722,6 +726,7 @@ def test_pausar_con_el_boton_guarda_la_marca(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
     ajustes = Settings()
+    ajustes.teleprompter.countdown_s = 0
     w = TeleprompterWindow(ajustes, text_path=ruta)
     assert not w._btn_marca.isEnabled()
     w._btn_play.click()                 # leer un rato
@@ -737,7 +742,7 @@ def test_pausar_con_el_boton_guarda_la_marca(qapp, tmp_path):
 def test_al_reabrir_sigue_desde_la_marca(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w1 = TeleprompterWindow(Settings(), text_path=ruta)
+    w1 = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w1.show()                           # como en la app: la bandera se pone con el ancho real de la ventana
     w1._btn_play.click()
     w1._view.advance(2.0)
@@ -756,7 +761,7 @@ def test_al_reabrir_sigue_desde_la_marca(qapp, tmp_path):
 def test_con_otro_texto_no_hay_marca(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w1 = TeleprompterWindow(Settings(), text_path=ruta)
+    w1 = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w1._btn_play.click()
     w1._view.advance(2.0)
     w1._btn_play.click()
@@ -775,7 +780,7 @@ def test_con_otro_texto_no_hay_marca(qapp, tmp_path):
 def test_ir_a_la_marca_tras_rebobinar_vuelve_a_la_bandera(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w = TeleprompterWindow(Settings(), text_path=ruta)
+    w = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w._btn_play.click()
     w._view.advance(2.0)
     w._btn_play.click()
@@ -792,7 +797,7 @@ def test_ir_a_la_marca_tras_rebobinar_vuelve_a_la_bandera(qapp, tmp_path):
 def test_tecla_B_va_a_la_marca(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w = TeleprompterWindow(Settings(), text_path=ruta)
+    w = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w.show()
     w.activateWindow()
     QTest.qWaitForWindowActive(w)
@@ -838,7 +843,7 @@ def test_barra_de_avance_guardada_arranca_oculta(qapp, tmp_path):
 def test_cerrar_mientras_se_lee_guarda_la_marca(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w = TeleprompterWindow(Settings(), text_path=ruta)
+    w = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w._btn_play.click()
     w._view.advance(2.0)
     assert w._view.is_playing()
@@ -1023,7 +1028,7 @@ def test_bandera_del_usuario_se_guarda_con_la_huella_del_texto(qapp, tmp_path):
 def test_aviso_de_marca_solo_al_cambiar_la_de_pausa(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w = TeleprompterWindow(Settings(), text_path=ruta)
+    w = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w.show()
     _clic_margen(w._view)
     assert w.statusBar().currentMessage() == ""
@@ -1037,7 +1042,7 @@ def test_aviso_de_marca_solo_al_cambiar_la_de_pausa(qapp, tmp_path):
 def test_al_reabrir_se_restauran_las_banderas_del_usuario_y_la_de_pausa(qapp, tmp_path):
     ruta = tmp_path / "t.txt"
     ruta.write_text(TEXTO_LARGO, encoding="utf-8")
-    w1 = TeleprompterWindow(Settings(), text_path=ruta)
+    w1 = TeleprompterWindow(_sin_cuenta(), text_path=ruta)
     w1.show()
     _clic_margen(w1._view)                 # bandera del usuario al principio
     w1._btn_play.click()
@@ -1297,3 +1302,339 @@ def test_con_angulo_la_banda_y_la_barra_quedan_rectas(qapp):
     QTest.mouseClick(v, Qt.MouseButton.LeftButton, pos=QPoint(round(pista.center().x()), round(pista.center().y())))
     assert v.progress() == pytest.approx(0.5, abs=0.05)
     assert v.grab().toImage().size() == v.size()
+
+# ---- cuenta atrás y tiempo de lectura -----------------------------------------
+def _ventana_con_texto(tmp_path, countdown_s: int = 3, mostrar: bool = True) -> TeleprompterWindow:
+    ajustes = Settings()
+    ajustes.teleprompter.countdown_s = countdown_s
+    ruta = tmp_path / "t.txt"
+    ruta.write_text(TEXTO_LARGO, encoding="utf-8")
+    w = TeleprompterWindow(ajustes, text_path=ruta)
+    if mostrar:
+        w.show()
+        w.activateWindow()
+        QTest.qWaitForWindowActive(w)
+    return w
+
+
+def test_cuenta_atras_no_empieza_a_leer_hasta_el_ultimo_segundo(qapp, tmp_path):
+    w = _ventana_con_texto(tmp_path, countdown_s=3)
+    w.start_reading()
+    assert w.is_counting_down()
+    assert not w._view.is_playing()
+    assert w._cuenta_label.text() == "3" and w._cuenta_label.isVisible()
+    w._tick_cuenta()                        # 2
+    w._tick_cuenta()                        # 1
+    assert w.is_counting_down() and not w._view.is_playing()
+    assert w._cuenta_label.text() == "1"
+    assert w._btn_play.text() == "✕ Cancelar"
+    w._tick_cuenta()                        # 0: empieza a leer
+    assert not w.is_counting_down()
+    assert w._view.is_playing()
+    assert w._btn_play.text() == "⏸ Pausar"
+    assert not w._cuenta_label.isVisible()
+    w.close()
+
+
+def test_espacio_durante_la_cuenta_la_cancela(qapp, tmp_path):
+    w = _ventana_con_texto(tmp_path, countdown_s=3)
+    w._view.setFocus()
+    QTest.keyClick(w._view, Qt.Key.Key_Space)      # empieza la cuenta
+    assert w.is_counting_down()
+    QTest.keyClick(w._view, Qt.Key.Key_Space)      # cancela
+    assert not w.is_counting_down()
+    assert not w._view.is_playing()
+    assert w._btn_play.text() == "▶ Iniciar"
+    w._tick_cuenta()                               # aunque llegue un tick viejo no debe arrancar
+    assert not w._view.is_playing()
+    w.close()
+
+
+def test_boton_durante_la_cuenta_la_cancela(qapp, tmp_path):
+    w = _ventana_con_texto(tmp_path, countdown_s=3, mostrar=False)
+    w._btn_play.click()                            # empieza la cuenta
+    assert w.is_counting_down()
+    w._btn_play.click()                            # cancela
+    assert not w.is_counting_down()
+    assert not w._view.is_playing()
+    w.close()
+
+
+def test_pausar_es_inmediato_sin_cuenta(qapp, tmp_path):
+    w = _ventana_con_texto(tmp_path, countdown_s=0, mostrar=False)
+    w._btn_play.click()
+    assert w._view.is_playing()
+    w._btn_play.click()                            # pausa: sin cuenta atrás
+    assert not w._view.is_playing()
+    assert not w.is_counting_down()
+    w.close()
+
+
+def test_sin_cuenta_atras_empieza_enseguida(qapp, tmp_path):
+    w = _ventana_con_texto(tmp_path, countdown_s=0, mostrar=False)
+    w.start_reading()
+    assert not w.is_counting_down()
+    assert w._view.is_playing()
+    w.close()
+
+
+def test_ajuste_de_cuenta_atras_se_guarda_y_se_carga(qapp, tmp_path):
+    ajustes = Settings()
+    ajustes.teleprompter.countdown_s = 5
+    ruta = tmp_path / "t.txt"
+    ruta.write_text("Texto", encoding="utf-8")
+    w = TeleprompterWindow(ajustes, text_path=ruta)
+    assert w._combo_cuenta.currentData() == 5
+    w._combo_cuenta.setCurrentIndex(w._combo_cuenta.findData(0))
+    assert ajustes.teleprompter.countdown_s == 0
+    w.close()
+    assert Settings.load(settings_path()).teleprompter.countdown_s == 0
+
+
+def test_formato_de_tiempo():
+    from cronista.teleprompter.window import formato_tiempo
+    assert formato_tiempo(0) == "0:00"
+    assert formato_tiempo(42) == "0:42"
+    assert formato_tiempo(190) == "3:10"
+    assert formato_tiempo(3725) == "1:02:05"
+    assert formato_tiempo(-3) == "0:00"
+
+
+def test_indicador_de_tiempo_sin_texto_muestra_guion(qapp, tmp_path):
+    w = TeleprompterWindow(Settings(), text_path=tmp_path / "t.txt")
+    assert w._lbl_tiempo.text() == "⏱ —"
+    w.close()
+
+
+def test_indicador_de_tiempo_avanza_y_lo_que_falta_baja(qapp, tmp_path):
+    from cronista.teleprompter.window import formato_tiempo
+    w = _ventana_con_texto(tmp_path, countdown_s=0)
+    v = w._view
+    v.set_speed(10)
+    px_s = tt.speed_to_px_per_s(v.speed(), v.line_height())
+    total = v.max_offset() / px_s
+    assert w._lbl_tiempo.text() == (f"⏱ 0:00 / {formato_tiempo(total)} · faltan {formato_tiempo(total)}")
+    falta_antes = total
+    v.play()
+    v.advance(6.0)                                 # 6 s de lectura a velocidad 10
+    assert v.offset() / px_s == pytest.approx(6.0, rel=1e-6)
+    assert w._lbl_tiempo.text() == (f"⏱ 0:06 / {formato_tiempo(total)} · "
+                                    f"faltan {formato_tiempo(total - 6.0)}")
+    assert total - 6.0 < falta_antes
+    v.pause()
+    w.close()
+
+
+def test_indicador_de_tiempo_con_velocidad_nueva_se_actualiza(qapp, tmp_path):
+    w = _ventana_con_texto(tmp_path, countdown_s=0, mostrar=False)
+    w._slider.setValue(20)
+    v = w._view
+    px_s = tt.speed_to_px_per_s(20, v.line_height())
+    total = v.max_offset() / px_s
+    assert w._lbl_tiempo.text().endswith(f"/ {formato_tiempo_local(total)} · faltan {formato_tiempo_local(total)}")
+    w.close()
+
+
+def formato_tiempo_local(segundos: float) -> str:
+    from cronista.teleprompter.window import formato_tiempo
+    return formato_tiempo(segundos)
+
+
+def _sin_cuenta() -> Settings:
+    """Ajustes con la cuenta atrás apagada, para las pruebas que no miran la cuenta sino la lectura."""
+    ajustes = Settings()
+    ajustes.teleprompter.countdown_s = 0
+    return ajustes
+
+
+# ---- líneas por frases ---------------------------------------------------------------
+SEP = tt.LINE_SEPARATOR
+
+
+def _trozos(texto: str) -> list[str]:
+    return tt.phrase_breaks(texto).split(SEP)
+
+
+def test_cortes_por_frase_no_cambian_la_longitud_ni_las_letras():
+    texto = "Hola a todos, bienvenidos otra vez. Hoy, sin prisa, hablamos del juego: es muy largo.\nOtra línea."
+    cortado = tt.phrase_breaks(texto)
+    assert len(cortado) == len(texto)
+    assert cortado.replace(SEP, " ") == texto
+
+
+def test_corta_tras_punto_y_coma_con_palabras_suficientes():
+    assert _trozos("Esto es lo primero. Esto es lo segundo.") == ["Esto es lo primero.", "Esto es lo segundo."]
+    assert _trozos("Vamos a ver todo, y luego lo comentamos") == ["Vamos a ver todo,", "y luego lo comentamos"]
+    assert _trozos("Bueno, vamos allá con esto") == ["Bueno, vamos allá con esto"]    # coma tras una sola palabra
+
+
+def test_no_corta_titulos_ni_abreviaturas():
+    assert _trozos("Hoy jugamos Rise of Iron: D-Day en directo") == ["Hoy jugamos Rise of Iron: D-Day en directo"]
+    assert _trozos("Lo dijo el Sr. García ayer mismo") == ["Lo dijo el Sr. García ayer mismo"]
+    assert _trozos("Vale 3.5 dólares más o menos") == ["Vale 3.5 dólares más o menos"]
+
+
+def test_corta_frases_largas_antes_de_un_conector():
+    assert _trozos("El combate se siente lento y muy pesado desde el principio pero mejora hacia el final del juego") == \
+        ["El combate se siente lento y muy pesado desde el principio", "pero mejora hacia el final del juego"]
+
+
+def test_vista_con_frases_conserva_texto_banderas_y_lo_que_se_lee(qapp):
+    v = _vista("\n".join("Primera parte de la frase, segunda parte de la frase. Y otra frase más al final." for _ in range(40)))
+    original = v.text()
+    v.scroll_by_lines(20)
+    ancla = v._pos_at_y(v.offset() + v.line_height() / 2)
+    v.set_marks([ancla], -1)
+    lineas_antes = v.max_offset()
+    v.set_phrase_breaks(True)
+    assert v.has_phrase_breaks() and v.text() == original
+    assert v.max_offset() > lineas_antes                 # más líneas
+    assert v.manual_marks() == [ancla]
+    assert v._line_top(v._pos_at_y(v.offset() + v.line_height() / 2)) == pytest.approx(v._line_top(ancla))
+    assert v._doc.characterCount() == len(original) + 1  # mismas posiciones: las banderas y Smart siguen valiendo
+    v.set_phrase_breaks(False)
+    assert v.max_offset() == pytest.approx(lineas_antes)
+
+
+def test_boton_de_frases_actualiza_vista_y_ajustes_y_se_recuerda(qapp, tmp_path):
+    ajustes = Settings()
+    ruta = tmp_path / "t.txt"
+    ruta.write_text("Una frase corta aquí. Otra frase corta allá.", encoding="utf-8")
+    w = TeleprompterWindow(ajustes, text_path=ruta)
+    w._btn_frases.setChecked(True)
+    assert w._view.has_phrase_breaks() and ajustes.teleprompter.phrase_breaks
+    w.close()
+    w2 = TeleprompterWindow(ajustes, text_path=ruta)
+    assert w2._view.has_phrase_breaks() and w2._btn_frases.isChecked()
+    w2.close()
+
+
+def test_letras_nuevas_incluidas_existen_y_cargan(qapp):
+    from cronista.core.paths import app_root
+    assert all((app_root() / "fonts" / o.file).is_file() for o in fonts.FONT_OPTIONS if o.file)
+    disponibles = {o.family for o in fonts.available_options()}
+    assert {"Courier Prime", "Andika", "CMU Serif", "Intel One Mono", "Literata", "B612"} <= disponibles
+    assert len({o.family for o in fonts.FONT_OPTIONS}) == len(fonts.FONT_OPTIONS)
+
+# ---- líneas por frases: casos reales de un guion -------------------------------------
+def test_no_separa_nombres_ni_enumeraciones():
+    for frase in ("La dejé al mismo nivel que las de Iron 4 y Iron 5 sin ninguna duda ni tampoco remordimiento",
+                  "En la trilogía había experiencia, confianza y una hermandad muy clara"):
+        trozos = _trozos(frase)
+        assert not any(t.startswith("y Iron") or t.endswith("experiencia,") for t in trozos), trozos
+    assert _trozos("Lo sé desde el principio: Ana, Lucas, Mara y Tomás") == ["Lo sé desde el principio:", "Ana, Lucas, Mara y Tomás"]
+
+
+def test_dos_puntos_antes_de_mayuscula_cortan_si_no_es_titulo():
+    assert _trozos("Y debo decirlo desde ya: D-Day me parece divertido") == ["Y debo decirlo desde ya:", "D-Day me parece divertido"]
+
+
+def test_trozo_largo_se_parte_por_su_mejor_punto():
+    trozos = _trozos("El segundo lo expandía y el tercero juntaba todo eso con una jugabilidad mucho más afinada.")
+    assert trozos == ["El segundo lo expandía", "y el tercero juntaba todo eso", "con una jugabilidad mucho más afinada."]
+
+
+def test_ninguna_linea_termina_en_palabra_que_necesita_la_siguiente():
+    frase = ("El problema es que los personajes nuevos de esta campaña no me interesan lo suficiente para seguir "
+             "jugando con la misma ilusión de la que hablaba al principio del video")
+    for trozo in _trozos(frase)[:-1]:
+        assert trozo.split()[-1].lower() not in {"es", "de", "la", "los", "el", "que", "y", "con", "para", "no"}, trozo
+
+
+def test_el_ancho_de_linea_cambia_cuanto_se_parte():
+    frase = "Yo crecí con Rise of Iron y he seguido la saga desde el primero hasta el más reciente durante muchos años"
+    assert len(tt.phrase_breaks(frase, 30).split(SEP)) > len(tt.phrase_breaks(frase, 70).split(SEP)) > 1
+    assert len(tt.phrase_breaks(frase, 30)) == len(frase)
+
+
+def test_lineas_vacias_y_texto_vacio_no_fallan():
+    assert tt.phrase_breaks("") == ""
+    assert tt.phrase_breaks("Una frase corta aquí. Otra frase corta allá.\n\n   \nFin.").count("\n") == 3
+
+
+def test_la_vista_ajusta_los_cortes_al_tamano_y_conserva_posiciones(qapp):
+    texto = "\n".join("Hablan demasiado y se adaptan demasiado fácil a una amenaza que debería sentirse desesperada." for _ in range(30))
+    v = _vista(texto)
+    v.set_phrase_breaks(True)
+    v.scroll_by_lines(10)
+    ancla = v._pos_at_y(v.offset() + v.line_height() / 2)
+    v.set_marks([ancla], -1)
+    v.set_font_size(30)
+    tope_pequena = v._phrase_cap
+    leyendo = v._pos_at_y(v.offset() + v.line_height() / 2)      # lo que se lee justo antes de agrandar la letra
+    v.set_font_size(120)
+    assert v._phrase_cap < tope_pequena
+    assert v._doc.characterCount() == len(texto) + 1 and v.text() == texto and v.manual_marks() == [ancla]
+    assert v._line_top(v._pos_at_y(v.offset() + v.line_height() / 2)) == pytest.approx(v._line_top(leyendo))
+
+# ---- análisis gramatical de las pausas ---------------------------------------------
+@pytest.fixture
+def costes_de():
+    pytest.importorskip("es_core_news_sm")
+    from cronista.teleprompter import gramatica
+    return gramatica.pause_costs
+
+
+def _trozos_gram(frase: str, costes_de, cap: int = 53) -> list[str]:
+    return tt.phrase_breaks(frase, cap, costes_de(frase)).split(SEP)
+
+
+def test_gramatica_no_deja_al_final_palabras_que_dependen_de_la_siguiente(costes_de):
+    frase = "Por eso me importa explicar qué rechazo de lo que es ahora frente a lo que llegó a ser hace ya bastante tiempo"
+    for trozo in _trozos_gram(frase, costes_de)[:-1]:
+        assert trozo.split()[-1].lower() not in {"a", "de", "es", "que", "el", "la", "y"}, trozo
+
+
+def test_gramatica_mantiene_juntos_los_nombres(costes_de):
+    frase = "Entiendo que Lucas y Ana sean mucho más jóvenes aquí y que estemos viendo el Día del Hierro otra vez"
+    assert not any(t.startswith("y Ana") or t.endswith("Lucas") for t in _trozos_gram(frase, costes_de))
+
+
+def test_gramatica_separa_dos_oraciones_aunque_quepan(costes_de):
+    frase = "El juego empieza con mucha fuerza y luego pierde todo el ritmo que tenía"
+    assert len(_trozos_gram(frase, costes_de, cap=200)) == 2
+    assert _trozos_gram(frase, costes_de, cap=200)[1].startswith("y luego")
+
+
+def test_gramatica_conserva_la_longitud_y_las_lineas(costes_de):
+    texto = "Una frase con varias palabras y otra que sigue después de esa.\n\n  \nFin del texto, sin más."
+    cortado = tt.phrase_breaks(texto, 20, costes_de(texto))
+    assert len(cortado) == len(texto) and cortado.count("\n") == texto.count("\n")
+
+
+def test_la_vista_aplica_el_analisis_sin_mover_lo_que_se_lee(qapp, costes_de):
+    texto = "\n".join("El juego empieza con mucha fuerza y luego pierde todo el ritmo que tenía al principio." for _ in range(30))
+    v = _vista(texto)
+    v.set_phrase_breaks(True)
+    v.scroll_by_lines(12)
+    leyendo = v._pos_at_y(v.offset() + v.line_height() / 2)
+    v._on_grammar(texto, costes_de(texto))
+    assert v._grammar_text == texto
+    assert v._line_top(v._pos_at_y(v.offset() + v.line_height() / 2)) == pytest.approx(v._line_top(leyendo))
+    assert v.text() == texto
+
+
+def test_analisis_de_un_texto_antiguo_se_ignora(qapp):
+    v = _vista("Texto actual de la vista.")
+    v.set_phrase_breaks(True)
+    v._on_grammar("Otro texto distinto.", {})
+    assert v._grammar_text is None
+
+
+def test_el_analisis_llega_a_la_vista_desde_su_hilo(qapp, costes_de, monkeypatch):
+    from cronista.teleprompter import gramatica
+    monkeypatch.setattr(gramatica, "enabled", True)
+    texto = "\n".join("El juego empieza con mucha fuerza y luego pierde todo el ritmo que tenía." for _ in range(5))
+    v = _vista(texto)
+    v.set_phrase_breaks(True)
+    for _ in range(600):                     # hasta 30 s: la primera vez se carga el modelo
+        if v._grammar_text == texto:
+            break
+        QTest.qWait(50)
+    assert v._grammar_text == texto and v._grammar_costs and v._grammar_pending is None
+
+
+def test_sin_analizador_se_usan_las_reglas(qapp, monkeypatch):
+    from cronista.teleprompter import gramatica
+    monkeypatch.setattr(gramatica, "_load", lambda: None)
+    assert gramatica.pause_costs("Una frase cualquiera.") is None

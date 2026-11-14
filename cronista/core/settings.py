@@ -165,6 +165,7 @@ class TeleprompterSettings:
     speed: int = 10                    # 1-30; 10 ≈ un tercio de línea por segundo (ritmo de habla normal)
     mirror: bool = False               # reflejar en horizontal para el cristal de un teleprompter
     center_text: bool = False          # líneas centradas a lo ancho (False = alineadas a la izquierda)
+    phrase_breaks: bool = False        # mostrar las líneas cortadas por frases (no cambia el texto guardado)
     guide_center: bool = False         # línea de lectura a media altura (False = a un tercio)
     show_progress_bar: bool = True     # barra de avance a la derecha
     view_angle: int = 0                # ángulo de visión (grados): + = miras desde arriba, − = desde abajo
@@ -174,6 +175,9 @@ class TeleprompterSettings:
     bookmarks: list[int] = field(default_factory=list)   # banderas puestas con un clic en el margen
     bookmark_crc: int = 0              # huella (zlib.crc32) del texto al que pertenecen las banderas
     margin_pct: int = 10               # margen a cada lado (% del ancho)
+    smart_mic: str = ""                # micrófono del modo Smart ("" = el predeterminado de Windows)
+    smart: bool = False                # modo Smart: el texto sigue la voz (reconocimiento local con Vosk)
+    countdown_s: int = 3               # cuenta atrás (segundos) antes de empezar a leer; 0 = empieza enseguida
     last_file: str = ""                # último archivo abierto (para empezar el diálogo en su carpeta)
 
 
