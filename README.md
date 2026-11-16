@@ -5,6 +5,8 @@ Teleprompter gratuito para Windows, pensado para grabar videos leyendo tu guion.
 Movimiento suave, letras muy legibles y banderas para retomar donde te quedaste.
 </p>
 
+<p align="center"><a href="https://github.com/DrownedMisfit/Cronista/releases/latest/download/Cronista.zip"><img src="https://img.shields.io/badge/%E2%AC%87%20Descargar-Windows%2010%20%2F%2011-orange?style=for-the-badge" alt="Descargar para Windows"></a><br><sub>Gratis · <a href="#-descargar-y-usar-windows-10--11">cómo instalarlo</a></sub></p>
+
 <p align="center"><a href="https://ko-fi.com/pigmeofurtivoyt"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Apóyame en Ko-fi"></a><br><sub>Es gratis. Si te sirve, puedes invitarme un café ☕</sub></p>
 
 ---
@@ -36,17 +38,27 @@ Movimiento suave, letras muy legibles y banderas para retomar donde te quedaste.
 | M | Espejo |
 | F11 / Esc | Pantalla completa / salir |
 
-## Instalación (Windows 10 / 11)
+## ⬇ Descargar y usar (Windows 10 / 11)
 
-**Lo más fácil:** descarga `Cronista.zip` de la sección **[Releases](../../releases)**, descomprímelo y haz doble
-clic en **«Abrir Cronista.bat»**. La primera vez prepara todo solo (si hace falta, instala Python).
+<p align="center"><a href="https://github.com/DrownedMisfit/Cronista/releases/latest/download/Cronista.zip"><b>⬇ Descargar Cronista (1,5 MB)</b></a></p>
 
-**Desde el código:**
+1. Descomprime **Cronista.zip**: clic derecho → **Extraer todo** (no lo abras desde dentro del zip).
+2. Entra en la carpeta y haz doble clic en **«Abrir Cronista.bat»**. La primera vez prepara todo solo (unos 200 MB,
+   necesita internet; si no tienes Python, lo instala). Después se abre directamente.
+3. Si Windows dice **«Windows protegió su PC»**: **«Más información» → «Ejecutar de todas formas»**.
+
+En la carpeta viene **«COMO USAR.txt»** con lo básico. Todas las versiones:
+[página de descargas](https://github.com/DrownedMisfit/Cronista/releases).
+
+<details>
+<summary>Para programadores: desde el código</summary>
+
 ```
 python -m venv .venv
 .venv\Scripts\pip install -r requirements-teleprompter.txt
 run_cronista.bat
 ```
+</details>
 
 El manual completo está en **[MANUAL.md](MANUAL.md)**.
 
