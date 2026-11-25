@@ -54,6 +54,8 @@ def _ventana(texto: str, tmp_path) -> TeleprompterWindow:
 class _OyenteFalso(QObject):
     """Sustituye al micrófono: lo que se le dé con oir() llega como si se hubiera dicho."""
     heard = Signal(list)
+    heard_final = Signal(list)
+    analysed = Signal()
     error = Signal(str)
     level = Signal(float)
     started = Signal()
@@ -63,8 +65,10 @@ class _OyenteFalso(QObject):
         super().__init__(parent)
         self.activo = False
         self.idioma = None
+        self.unknown_words = set()
+        self.spoken_forms = {}
 
-    def start(self, lang, device=None):
+    def start(self, lang, device=None, vocabulary=None, acronyms_=None):
         self.activo, self.idioma, self.micro = True, lang, device
 
     def stop(self, timeout=2.0):
@@ -137,25 +141,30 @@ def test_smart_con_una_narracion_real(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(smart, "models_dir", lambda: MODELOS_REALES)
 
     class _OyenteWav(_OyenteFalso):
-        def start(self, lang, device=None):
+        def start(self, lang, device=None, vocabulary=None, acronyms_=None):
             super().start(lang, device)
+            self.vocabulario = vocabulary
             threading.Thread(target=self._leer, daemon=True).start()
 
         def _leer(self):
             vosk.SetLogLevel(-1)
             with wave.open(str(WAV)) as f:
-                rec = vosk.KaldiRecognizer(vosk.Model(str(smart.model_path("es"))), f.getframerate())
+                modelo = vosk.Model(str(smart.model_path("es")))
+                rec = (vosk.KaldiRecognizer(modelo, f.getframerate(), json.dumps(self.vocabulario, ensure_ascii=False))
+                       if self.vocabulario else vosk.KaldiRecognizer(modelo, f.getframerate()))
                 bloque = f.getframerate() // 8
                 while self.activo:
                     datos = f.readframes(bloque)
                     if not datos:
                         break
-                    if rec.AcceptWaveform(datos):
+                    if rec.AcceptWaveform(datos):                     # como el oyente real (smart.VoiceListener)
                         palabras = json.loads(rec.Result()).get("text", "").split()
+                        if palabras:
+                            self.heard_final.emit(palabras)
                     else:
                         palabras = json.loads(rec.PartialResult()).get("partial", "").split()
-                    if palabras:
-                        self.heard.emit(palabras)
+                        if palabras:
+                            self.heard.emit(palabras)
                     time.sleep(0.125 / 4)
 
     monkeypatch.setattr(smart, "VoiceListener", _OyenteWav)

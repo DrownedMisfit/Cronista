@@ -25,12 +25,22 @@ LO BÁSICO
      Arrastra la barra para moverla y la esquina para cambiar su tamaño. Esc o K: volver.
    - F o «Líneas por frases»: corta las líneas por frases, para leer en voz alta con pausas naturales.
    - L: cambiar el tipo de letra mientras lees (hay varias para probar).
+   - A: abre o cierra el panel de ajustes (letra, lectura, Smart y pantalla).
+   - R: toma mala. Vuelve al principio de la frase y sigues tras una cuenta atrás corta.
+
+AL ABRIR
+   Sale un momento la ventana de Cronista con una onda de luz y se abre el programa.
+   Un clic o cualquier tecla la saltan.
 
 MODO SMART (seguir la voz)
    Con «Smart» encendido, el texto avanza mientras lees en voz alta y se para si te callas.
    La primera vez que lo actives, Cronista baja un modelo de voz de unos 40 MB
    (necesita internet solo esa vez). Se guarda en %APPDATA%\Cronista\modelos.
    Todo se queda en tu PC: tu voz no se manda a ningún sitio.
+   Nombres raros, siglas (ONU, MP3) y números se entienden mejor desde la 0.12. Si una palabra
+   sale subrayada con puntos grises, Smart no la puede oír: ahí te guías tú (o cámbiala en el guion).
+   «Revisar lectura»: con Smart, Cronista apunta en silencio las frases donde parece que faltó algo
+   y, al pausar, las ves en «⚠ para revisar». Nunca te para. Se puede apagar.
 
 Las letras incluidas tienen licencias libres: ver la carpeta fonts (LICENCIAS.md).
 «Líneas por frases» usa spaCy (licencia MIT) y su modelo de español es_core_news_sm (GNU GPL 3.0).

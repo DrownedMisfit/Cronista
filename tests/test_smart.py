@@ -243,3 +243,86 @@ def test_integracion_narracion_real():
     porcentaje = follower.position() / len(guion)
     print(f"\nPosición final: {follower.position()} de {len(guion)} ({porcentaje:.0%})")
     assert porcentaje > 0.70
+
+
+# ---------------------------------------------------------------- memoria entre trozos y vocabulario
+
+def test_trozos_cortos_cerrados_se_enlazan():
+    f = ScriptFollower(GUION)
+    assert f.feed(["hola"], final=True) is None          # una palabra corta sola no basta…
+    assert f.feed(["todos"]) == _end_of(GUION, "todos")  # …pero enlazada con la siguiente, sí
+
+
+def test_trozo_repetido_no_salta_a_la_frase_parecida():
+    f = ScriptFollower(REPETIDA)
+    f.feed(["el", "combate", "del", "juego", "se", "siente"])
+    antes = f.position()
+    assert f.feed(["el", "combate", "del", "juego", "se", "siente"]) is None
+    assert f.feed(["el", "combate", "del", "juego", "se", "siente"], final=True) is None
+    assert f.position() == antes < REPETIDA.index("Luego")
+
+
+def test_lo_ya_usado_no_se_enlaza_con_la_frase_parecida():
+    f = ScriptFollower(REPETIDA)
+    f.feed(["el", "combate", "del", "juego"], final=True)
+    antes = f.position()
+    f.feed(["muy"])                                       # sigue en la primera frase, no en la de «muy ligero»
+    assert antes <= f.position() < REPETIDA.index("Luego")
+
+
+def test_vocabulario_del_guion():
+    vocab = smart.script_vocabulary("Hola, Hola a todos. ¿Qué tal? Análisis.", "es")
+    assert vocab[-1] == "[unk]"
+    assert vocab.count("hola") == 1 and "análisis" in vocab and "qué" in vocab and "eh" in vocab
+
+# ---------------------------------------------------------------- palabras que el modelo no conoce
+
+_CONOCE = {"in", "jugable", "cinemática", "seis", "cinco", "ps", "o", "ene", "u", "pe", "ese", "dos", "mil",
+           "veintiséis", "onu", "mp", "tres", "eme", "o", "ene", "u"}.__contains__
+
+
+def test_numeros_en_palabras():
+    assert smart.number_words(6) == ["seis"]
+    assert smart.number_words(35) == ["treinta", "y", "cinco"]
+    assert smart.number_words(2026) == ["dos", "mil", "veintiséis"]
+    assert smart.number_words(1998) == ["mil", "novecientos", "noventa", "y", "ocho"]
+
+
+def test_piezas_que_suenan_igual_y_siglas():
+    assert smart.spoken_pieces("injugable", _CONOCE) == ["in", "jugable"]
+    assert smart.spoken_pieces("cinemáticas", _CONOCE) == ["cinemática"]
+    assert smart.spoken_pieces("mp3", _CONOCE) == ["mp", "tres"]
+    assert smart.spoken_pieces("xyzzy", _CONOCE) is None
+    assert smart.acronyms("La ONU 6 y el MP3. NUNCA les crean. Hola.") == {"onu", "mp3"}
+    formas = smart.spoken_forms(["onu", "6", "injugable", "hola"], lambda w: w == "hola" or _CONOCE(w), "es", {"onu"})
+    assert formas == {"onu": [["o", "ene", "u"]], "6": [["seis"]], "injugable": [["in", "jugable"]]}
+
+
+def test_seguidor_junta_las_piezas_oidas():
+    guion = "El juego es injugable en el MP3 y la ONU 6 sigue sin salir."
+    f = ScriptFollower(guion)
+    f.set_spoken_forms({"injugable": [["in", "jugable"]], "mp3": [["eme", "pe", "tres"]],
+                        "onu": [["o", "ene", "u"]], "6": [["seis"]]})
+    oido = ["el", "juego", "es", "in", "jugable"]
+    assert f.feed(oido) == _end_of(guion, "injugable")
+    oido += ["en", "el", "eme", "pe", "tres"]                # (el parcial va creciendo)
+    assert f.feed(oido) == _end_of(guion, "MP3")
+    assert f.feed(["y", "la", "o", "ene", "u", "seis", "sigue"], final=True) == _end_of(guion, "sigue")
+
+
+def test_microfono_repetido_en_varios_sistemas_se_elige_por_numero(monkeypatch):
+    """«Micrófono (D1)» sale en MME, DirectSound, WASAPI y WDM-KS: por el nombre solo, sounddevice fallaba."""
+    import sys
+    import types
+    falso = types.SimpleNamespace(
+        query_hostapis=lambda: [{"name": "MME"}, {"name": "Windows DirectSound"}, {"name": "Windows WASAPI"}],
+        query_devices=lambda i=None: (lambda lista: lista if i is None else lista[i])([
+            {"name": "Asignador de sonido Microsoft - Input", "max_input_channels": 2, "hostapi": 0},
+            {"name": "Micrófono (D1)", "max_input_channels": 1, "hostapi": 1},
+            {"name": "Micrófono (D1)", "max_input_channels": 1, "hostapi": 0},
+            {"name": "Micrófono (D1)", "max_input_channels": 1, "hostapi": 2},
+        ]))
+    monkeypatch.setitem(sys.modules, "sounddevice", falso)
+    assert smart.device_index("Micrófono (D1)") == 2          # el de MME
+    assert smart.device_index("") is None and smart.device_index(None) is None
+    assert smart.device_index("Uno que ya no está") is None    # desconectado: el predeterminado

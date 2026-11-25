@@ -81,6 +81,8 @@ def main() -> int:
         "--onedir", "--windowed", "--name", NOMBRE,
         "--distpath", str(DIST), "--workpath", str(BUILD), "--specpath", str(SPEC),
         "--paths", str(RAIZ),
+        "--icon", str(RAIZ / "cronista" / "teleprompter" / "assets" / "cronista.ico"),
+        "--add-data", f"{RAIZ / 'cronista' / 'teleprompter' / 'assets'};cronista/teleprompter/assets",
     ]
     for modulo in EXCLUIR:
         args += ["--exclude-module", modulo]

@@ -10,7 +10,8 @@ import zlib
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import (QCloseEvent, QCursor, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QKeySequence,
+from PySide6.QtGui import (QCloseEvent, QCursor, QDragEnterEvent, QDropEvent, QFont, QFontMetrics, QGuiApplication,
+                           QKeySequence,
                            QMouseEvent, QShortcut, QShowEvent, QTextCursor)
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QSlider, QSpinBox, QStackedWidget, QVBoxLayout,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLab
 from cronista import APP_NAME, __version__
 from cronista.core import paths
 from cronista.core.settings import Settings
-from cronista.teleprompter import fonts
+from cronista.teleprompter import diseno, ensayo, fonts
 from cronista.teleprompter import text as tp_text
 from cronista.teleprompter.text import (ANGLE_MAX, ANGLE_MIN, FONT_MAX, FONT_MIN, SPACING_MAX, SPACING_MIN,
                                         SPACING_STEP, SPEED_MAX, SPEED_MIN)
@@ -31,32 +32,20 @@ PAGE_READ = 0
 PAGE_EDIT = 1
 FILE_FILTER = "Textos (*.txt *.md *.docx);;Todos los archivos (*)"
 PLACEHOLDER = "Escribe o pega aquí tu texto, o abre un archivo (.txt, .md o .docx)…"
-HINT_TEXT = "Esc: salir de pantalla completa · Espacio: iniciar/pausar"
+HINT_TEXT = "Esc: salir de pantalla completa · Espacio: iniciar/pausar · A: ajustes"
 IDLE_MS = 3000             # pantalla completa leyendo: sin mover el ratón, se oculta la barra y el cursor
 HINT_MS = 3000             # cuánto tiempo se ve el aviso al entrar en pantalla completa
 SETTINGS_SAVE_MS = 800     # los ajustes se guardan tras una pausa, no en cada paso del control
 TEXT_SAVE_MS = 1000
 FONT_STEP = 4              # puntos por pulsación de + / -
 LINE_STEP = 3              # líneas por pulsación de RePág / AvPág
-ANCHO_INICIAL = 1500       # px: lo que piden las tres filas de la barra de controles
-FPS_OPCIONES = ((0, "Automático"), (60, "60 fps"), (120, "120 fps"), (144, "144 fps"), (240, "240 fps"))
+SMART_TIP = ("Modo Smart: el texto sigue tu voz. Avanza mientras lees en voz alta y se para si te callas o "
+             "improvisas. Todo en tu PC, sin internet (la primera vez baja un modelo de voz de unos 40 MB).")
+ANCHO_INICIAL = 1700       # px: la barra de abajo y el panel de ajustes abierto
+REVISAR_OPCIONES = (("apagado", "Apagado"), ("silencioso", "Silencioso"), ("discreto", "Discreto"),
+                    ("atento", "Atento"))
+FPS_OPCIONES =((0, "Automático"), (60, "60 fps"), (120, "120 fps"), (144, "144 fps"), (240, "240 fps"))
 CUENTA_OPCIONES = ((0, "Sin cuenta atrás"), (3, "3 s"), (5, "5 s"))
-
-
-def _boton(texto: str, ayuda: str, checkable: bool = False) -> QPushButton:
-    """Botón que no roba el foco: el foco se queda en la vista para que funcionen los atajos."""
-    b = QPushButton(texto)
-    b.setToolTip(ayuda)
-    b.setCheckable(checkable)
-    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    return b
-
-
-def _separador() -> QFrame:
-    linea = QFrame()
-    linea.setFrameShape(QFrame.Shape.VLine)
-    linea.setFrameShadow(QFrame.Shadow.Sunken)
-    return linea
 
 
 def _texto_angulo(grados: int) -> str:
@@ -94,15 +83,18 @@ class _Canvas(QWidget):
     así, al ocultarla en pantalla completa, el texto y la línea de lectura no se mueven.
     """
 
-    def __init__(self, stack: QWidget, bar: QWidget, aviso: QWidget, cuenta: QWidget) -> None:
+    def __init__(self, stack: QWidget, bar: QWidget, aviso: QWidget, cuenta: QWidget,
+                 panel: QWidget | None = None) -> None:
         super().__init__()
         self._stack = stack
         self._bar = bar
+        self._panel = panel
         self._aviso = aviso
         self._cuenta = cuenta
         self._reserve_bar = False
+        self.bar_min = None           # callable() → ancho mínimo de la barra ya compactada (lo da la ventana)
         self.on_place = None          # callable(alto_barra): la ventana avisa a la vista del hueco que tapa la barra
-        for hijo in (stack, bar, aviso, cuenta):
+        for hijo in (stack, bar, aviso, cuenta) + ((panel,) if panel is not None else ()):
             hijo.setParent(self)    # setParent oculta el widget: hay que volver a mostrarlo
         stack.show()
         bar.show()
@@ -120,8 +112,20 @@ class _Canvas(QWidget):
         self.place()
 
     def place(self) -> None:
-        ancho, alto = self.width(), self.height()
-        alto_barra = self._bar.sizeHint().height()
+        ancho_total, alto = self.width(), self.height()
+        # El panel de ajustes (si está abierto) ocupa la derecha de arriba abajo; el texto y la barra, el resto.
+        lateral = self._panel.width() if self._panel is not None and not self._panel.isHidden() else 0
+        alto_barra = self._bar.maximumHeight() if self._bar.maximumHeight() < 10000 else self._bar.sizeHint().height()
+        minimo = self.bar_min() if self.bar_min is not None else 0
+        if lateral and ancho_total - lateral < minimo:
+            # Ventana estrecha: si el panel estrechara la barra, no cabría ni compactada. El panel va ENCIMA del
+            # texto (sin tapar la barra, que sigue entera con su botón de Ajustes para cerrarlo).
+            ancho = ancho_total
+            self._panel.setGeometry(ancho_total - lateral, 0, lateral, alto - alto_barra)
+        else:
+            ancho = max(1, ancho_total - lateral)
+            if lateral:
+                self._panel.setGeometry(ancho, 0, lateral, alto)
         reserva = alto_barra if self._reserve_bar else 0
         self._stack.setGeometry(0, 0, ancho, alto - reserva)
         self._bar.setGeometry(0, alto - alto_barra, ancho, alto_barra)
@@ -131,6 +135,8 @@ class _Canvas(QWidget):
         self._aviso.move((ancho - self._aviso.width()) // 2, 16)
         self._aviso.raise_()
         self._bar.raise_()
+        if lateral:
+            self._panel.raise_()
         # La cuenta atrás va centrada sobre el texto (en el hueco de la vista, sin contar la barra al editar)
         self._cuenta.adjustSize()
         self._cuenta.move((ancho - self._cuenta.width()) // 2, (alto - reserva - self._cuenta.height()) // 2)
@@ -196,13 +202,20 @@ class TeleprompterWindow(QMainWindow):
                                          "font-size: 150pt; font-weight: bold; padding: 4px 56px; "
                                          "border-radius: 28px; }")
         self._cuenta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._canvas = _Canvas(self._stack, self._bar, self._aviso, self._cuenta_label)
+        self._canvas = _Canvas(self._stack, self._bar, self._aviso, self._cuenta_label, self._ajustes)
+        self._ajustes.setVisible(self._tp.settings_panel)
+        self._btn_ajustes.setChecked(self._tp.settings_panel)
         self.setCentralWidget(self._canvas)
         self._canvas.on_place = self._view.set_bottom_inset     # la vista deja libre el hueco de la barra
+        self._canvas.bar_min = self._bar_minimo
+        self.setMinimumWidth(self._bar_minimo() + 2)            # la barra, compactada, siempre cabe entera
         self._canvas.place()
         # La barra de estado se crea ya (si naciera con el primer mensaje, el texto daría un salto) y se oculta
         # en pantalla completa.
         self.statusBar()
+        self.statusBar().setStyleSheet(f"QStatusBar {{ background: {diseno.FONDO_HONDO}; color: {diseno.TENUE}; "
+                                       f"font-family: '{diseno.familia()}'; font-size: {diseno.LETRA_P}px; }} "
+                                       "QStatusBar::item { border: none; }")
 
         # Valores de los controles y de la vista, tomados de los ajustes (los rangos los limita la vista)
         self._view.set_font_size(self._tp.font_size)
@@ -241,6 +254,9 @@ class TeleprompterWindow(QMainWindow):
             self._combo_cuenta.addItem(f"{self._tp.countdown_s} s", self._tp.countdown_s)
             indice = self._combo_cuenta.count() - 1
         self._combo_cuenta.setCurrentIndex(indice)
+        if self._tp.review_level not in ensayo.REVIEW_LEVELS:
+            self._tp.review_level = "discreto"
+        self._combo_revisar.setCurrentIndex(self._combo_revisar.findData(self._tp.review_level))
         self._view.set_view_angle(self._tp.view_angle)
         self._tp.view_angle = self._view.view_angle()
         self._slider_angulo.setValue(self._view.view_angle())
@@ -274,6 +290,11 @@ class TeleprompterWindow(QMainWindow):
         self._view.on_manual_move = self._smart_reubicar
         self._oido_ultimo = 0.0            # cuándo llegó voz por última vez (para avisar «no te oigo»)
         self._oido_palabras = ""
+        self._sesion = None               # ensayo.SessionLog: tomas malas y posibles errores de esta lectura
+        self._oido_frase: list[str] = []  # palabras oídas desde que empezó la frase actual (para comparar)
+        self._frase_actual: int | None = None
+        self._revisor = None              # ensayo.ReadingChecker del texto actual (sabe lo bien que está oyendo)
+        self._revisor_texto = ""
         self._llenar_micros()
         self._connect()
         if self._tp.smart:                # se recuerda; si falta el modelo, al pulsar Iniciar se ofrece bajarlo
@@ -282,7 +303,7 @@ class TeleprompterWindow(QMainWindow):
             self._btn_smart.blockSignals(False)
             self._view.set_follow(True)
             self._lbl_oido.setVisible(True)
-            self._lbl_oido.setText("🎙 pulsa Iniciar y lee en voz alta")
+            self._lbl_oido.setText("pulsa Iniciar y lee en voz alta")
         self._actualizar_boton_borrar()
         self._install_shortcuts()
 
@@ -295,55 +316,112 @@ class TeleprompterWindow(QMainWindow):
         return t
 
     def _build_bar(self) -> None:
+        """Abajo, una sola barra (lo de leer); a la derecha, el panel de ajustes por secciones (se abre y se cierra con
+        el botón de Ajustes o la tecla A). Mismo sistema de diseño que Reclaimer (teleprompter/diseno.py)."""
+        D = diseno
+        estilo = D.qss()
         self._bar = QFrame()
         self._bar.setObjectName("controlBar")
-        self._bar.setStyleSheet("QFrame#controlBar { background: #23262d; }"
-                                "QPushButton:disabled { background: #2b2f38; border-color: #3a3f4b; color: #6e7681; }")
+        self._bar.setStyleSheet(estilo)
         self._bar.setMouseTracking(True)
-        capas = QVBoxLayout(self._bar)          # tres filas: reproducción y archivo, letra, y vista
-        capas.setContentsMargins(12, 8, 12, 8)
-        capas.setSpacing(6)
-        fila = QHBoxLayout()
-        fila.setSpacing(8)
-        aspecto = QHBoxLayout()
-        aspecto.setSpacing(8)
-        vista = QHBoxLayout()
-        vista.setSpacing(8)
+        fila = QHBoxLayout(self._bar)
+        fila.setContentsMargins(D.M3, D.M2, D.M3, D.M2)
+        fila.setSpacing(D.M1)
 
-        self._btn_editar = _boton("✎ Editar texto", "Editar o pegar el texto (Ctrl+E)", checkable=True)
-        self._btn_abrir = _boton("📂 Abrir…", "Abrir un archivo .txt, .md o .docx (Ctrl+O). "
-                                             "También puedes arrastrarlo a la ventana.")
-        self._btn_borrar = _boton("🗑 Borrar texto", "Borra todo el texto para escribir o pegar otro "
-                                                    "(pide confirmación).")
-        self._btn_play = _boton("▶ Iniciar", "Iniciar o pausar (Espacio). Al iniciar hay una cuenta atrás (ajuste "
-                                             "«Cuenta atrás»); pulsar otra vez durante ella la cancela. Al pausar queda "
-                                             "una bandera roja donde paraste y Cronista la recuerda para la próxima vez.")
-        self._btn_play.setObjectName("primary")
-        self._btn_inicio = _boton("⏮ Al principio", "Volver al principio del texto (Inicio)")
-        self._btn_marca = _boton("🚩 Ir a la marca", "Va a la siguiente bandera roja (B). "
-                                                    "Si hay varias, cada pulsación va a la siguiente.")
-        self._btn_quitar_marcas = _boton("✕ Quitar marcas", "Quita todas las banderas rojas. "
-                                                            "(Para quitar una sola, haz clic sobre ella.)")
+        self._btn_editar = D.boton("Editar texto", "square-pen", "Editar o pegar el texto (Ctrl+E)", True, "icono")
+        self._btn_abrir = D.boton("Abrir", "folder-open", "Abrir un archivo .txt, .md o .docx (Ctrl+O). También "
+                                                          "puedes arrastrarlo a la ventana.", tipo="icono")
+        self._btn_borrar = D.boton("Borrar texto", "trash-2", "Borrar todo el texto para escribir o pegar otro "
+                                                              "(pide confirmación).", tipo="icono")
+        self._btn_inicio = D.boton("Al principio", "skip-back", "Volver al principio del texto (Inicio)", tipo="icono")
+        self._btn_play = D.boton("Iniciar", "play", "Iniciar o pausar (Espacio). Al iniciar hay una cuenta atrás "
+                                                    "(ajuste «Cuenta atrás»); pulsar otra vez durante ella la cancela. "
+                                                    "Al pausar queda una bandera roja donde paraste y Cronista la "
+                                                    "recuerda para la próxima vez.", tipo="principal")
+        # (con la letra de la barra, que se aplica después con la hoja de estilo: así «Cancelar» cabe siempre)
+        self._fuente_barra = QFont(D.familia())
+        self._fuente_barra.setPixelSize(D.LETRA)
+        negrita = QFont(self._fuente_barra)
+        negrita.setWeight(QFont.Weight.DemiBold)
+        self._btn_play.setMinimumWidth(QFontMetrics(negrita).horizontalAdvance("Cancelar") + D.ICONO + 52)
+        self._btn_smart = D.boton("Smart", "mic", SMART_TIP, checkable=True)
+        self._lbl_oido = D.EtiquetaElidida("", 80)
+        self._lbl_oido.setObjectName("dDato")
+        self._lbl_oido.setMaximumWidth(320)
+        self._lbl_oido.setToolTip("Modo Smart: el volumen que llega del micrófono y las últimas palabras que entendí. "
+                                  "Si no se mueve al hablar, elige otro micrófono en Ajustes → Smart.")
+        self._lbl_oido.hide()
+        self._btn_marca = D.boton("Ir a la marca", "flag", "Ir a la siguiente bandera roja (B). Si hay varias, cada "
+                                                           "pulsación va a la siguiente.", tipo="icono")
+        self._btn_quitar_marcas = D.boton("Quitar marcas", "x", "Quitar todas las banderas rojas. (Para quitar una "
+                                                                "sola, haz clic sobre ella.)", tipo="icono")
+        self._btn_revisar = D.boton("Revisar", "triangle-alert", "Frases donde Smart cree que faltó algo al leer. Clic: "
+                                    "ir a la siguiente. Es una sospecha: el reconocedor también se equivoca. Se "
+                                    "configura en Ajustes → Smart → Revisar lectura.", tipo="aviso")
+        self._btn_revisar.hide()
 
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(SPEED_MIN, SPEED_MAX)
-        self._slider.setFixedWidth(160)
+        self._slider.setFixedWidth(150)
         self._slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._slider.setToolTip("Velocidad del desplazamiento (flecha arriba: más rápido; abajo: más lento)")
         self._lbl_velocidad = QLabel()
+        self._lbl_velocidad.setObjectName("dDato")
+        self._lbl_velocidad.setFixedWidth(self._lbl_velocidad.fontMetrics().horizontalAdvance("30") + 6)
         self._lbl_velocidad.setToolTip("Velocidad actual (1 a 30)")
-        self._lbl_tiempo = QLabel("⏱ —")
-        self._lbl_tiempo.setMinimumWidth(230)
+        self._lbl_tiempo = QLabel("—")
+        self._lbl_tiempo.setObjectName("dDato")
         self._lbl_tiempo.setToolTip("Tiempo leído / duración total del texto a esta velocidad, y lo que falta")
-        self._combo_cuenta = QComboBox()
-        self._combo_cuenta.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for segundos, nombre in CUENTA_OPCIONES:
-            self._combo_cuenta.addItem(nombre, segundos)
-        self._combo_cuenta.setToolTip("Cuenta atrás antes de empezar a leer (al pulsar Iniciar o Espacio). "
-                                      "Pulsar otra vez durante la cuenta la cancela. Pausar es inmediato.")
+        self._lbl_progreso = QLabel("0 %")
+        self._lbl_progreso.setObjectName("dDato")
+        self._lbl_progreso.setToolTip("Progreso de la lectura")
+        self._btn_camara = D.boton("Junto a la cámara", "camera", "Junto a la cámara (K): la ventana se vuelve una "
+                                   "franja siempre encima, arriba de la pantalla, bajo la webcam: lees mirando casi al "
+                                   "lente. Arrastra la barra para moverla y la esquina para cambiar su tamaño. K o Esc: "
+                                   "volver.", checkable=True, tipo="icono")
+        self._btn_pantalla = D.boton("Pantalla completa", "maximize", "Pantalla completa (F11). En pantalla completa, "
+                                                                      "Esc sale.", tipo="icono")
+        self._btn_ajustes = D.boton("Ajustes", "sliders-horizontal", "Ajustes (A): letra, lectura, Smart y pantalla.",
+                                    checkable=True, tipo="icono")
+        from PySide6.QtWidgets import QSizeGrip
+        self._grip = QSizeGrip(self._bar)
+        self._grip.setToolTip("Arrastra para cambiar el tamaño de la franja")
+        self._grip.hide()
 
-        self._combo_fuente = QComboBox()
-        self._combo_fuente.setMinimumWidth(220)
+        for w in (self._btn_editar, self._btn_abrir, self._btn_borrar):
+            fila.addWidget(w)
+        fila.addSpacing(D.M2)
+        fila.addWidget(D.separador())
+        fila.addSpacing(D.M2)
+        for w in (self._btn_inicio, self._btn_play, self._btn_smart):
+            fila.addWidget(w)
+        fila.addWidget(self._lbl_oido, 1)
+        fila.addSpacing(D.M2)
+        fila.addWidget(D.separador())
+        fila.addSpacing(D.M2)
+        for w in (self._btn_marca, self._btn_quitar_marcas, self._btn_revisar):
+            fila.addWidget(w)
+        fila.addStretch(1)
+        self._lbl_vel_titulo = D.etiqueta("Velocidad", None)
+        fila.addWidget(self._lbl_vel_titulo)
+        fila.addWidget(self._slider)
+        fila.addWidget(self._lbl_velocidad)
+        fila.addSpacing(D.M2)
+        fila.addWidget(self._lbl_tiempo)
+        fila.addSpacing(D.M2)
+        fila.addWidget(self._lbl_progreso)
+        fila.addSpacing(D.M2)
+        fila.addWidget(D.separador())
+        fila.addSpacing(D.M2)
+        for w in (self._btn_camara, self._btn_pantalla, self._btn_ajustes):
+            fila.addWidget(w)
+        fila.addWidget(self._grip, 0, Qt.AlignmentFlag.AlignBottom)
+        self._bar.setFixedHeight(D.ALTO_BARRA)
+        self._bar_nivel = 0
+        self._bar.installEventFilter(self)       # al cambiar de ancho, se compacta (nunca se corta nada)
+
+        # ---- panel de ajustes ----------------------------------------------------------------------------------
+        self._combo_fuente = diseno.ComboElidido()
         self._combo_fuente.setMaxVisibleItems(len(fonts.FONT_OPTIONS))     # que se vean todas sin desplazar la lista
         self._combo_fuente.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # los atajos (L) siguen en la vista
         self._combo_fuente.setToolTip("Tipo de letra del texto (L: siguiente, Mayús+L: anterior)")
@@ -352,119 +430,156 @@ class TeleprompterWindow(QMainWindow):
             i = self._combo_fuente.count() - 1
             self._combo_fuente.setItemData(i, opt.note, Qt.ItemDataRole.ToolTipRole)
             self._combo_fuente.setItemData(i, QFont(opt.family, 12), Qt.ItemDataRole.FontRole)   # su nombre en su letra
-
         self._spin = QSpinBox()
         self._spin.setRange(FONT_MIN, FONT_MAX)
         self._spin.setSingleStep(FONT_STEP)
         self._spin.setSuffix(" pt")
         self._spin.setToolTip("Tamaño de la letra (+ y − en el teclado, o Ctrl + rueda del ratón)")
-
         self._spin_espaciado = QSpinBox()
         self._spin_espaciado.setRange(SPACING_MIN, SPACING_MAX)
         self._spin_espaciado.setSingleStep(SPACING_STEP)
         self._spin_espaciado.setSuffix(" %")
         self._spin_espaciado.setToolTip("Separación extra entre letras. A algunas personas les resulta más cómoda: "
                                         "pruébala.")
-
-        self._btn_espejo = _boton("⇋ Espejo", "Refleja el texto en horizontal para el cristal del "
-                                              "teleprompter (M)", checkable=True)
-        self._btn_centrar = _boton("↔ Centrar líneas", "Centra cada línea a lo ancho de la pantalla (C)",
-                                   checkable=True)
-        self._btn_frases = _boton("✂ Líneas por frases", "Corta las líneas al terminar cada frase y en las comas, para "
-                                                         "leer en voz alta con pausas naturales. Solo cambia cómo se "
-                                                         "ve: tu texto no se modifica (F)", checkable=True)
-        self._btn_guia = _boton("↕ Lectura al centro","Pone la línea de lectura a media altura de la pantalla, a la "
-                                                       "altura del objetivo de la cámara si usas el cristal",
-                                checkable=True)
-        self._btn_barra = _boton("▮ Barra de avance", "Muestra a la derecha por dónde vas del texto. "
-                                                      "Púlsala o arrástrala para saltar.", checkable=True)
-        self._combo_fps = QComboBox()
+        self._btn_centrar = D.boton("Centrar líneas", "align-center", "Centra cada línea a lo ancho de la pantalla (C)",
+                                    checkable=True)
+        self._btn_frases = D.boton("Líneas por frases", "scissors", "Corta las líneas al terminar cada frase y en las "
+                                   "comas, para leer en voz alta con pausas naturales. Solo cambia cómo se ve: tu "
+                                   "texto no se modifica (F)", checkable=True)
+        self._combo_cuenta = diseno.ComboElidido()
+        self._combo_cuenta.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for segundos, nombre in CUENTA_OPCIONES:
+            self._combo_cuenta.addItem(nombre, segundos)
+        self._combo_cuenta.setToolTip("Cuenta atrás antes de empezar a leer (al pulsar Iniciar o Espacio). "
+                                      "Pulsar otra vez durante la cuenta la cancela. Pausar es inmediato.")
+        self._combo_fps = diseno.ComboElidido()
         self._combo_fps.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for valor, nombre in FPS_OPCIONES:
             self._combo_fps.addItem(nombre, valor)
-        ayuda_fps = ("Fotogramas por segundo al desplazar el texto: más = más fluido, pero gasta algo más. "
-                     "Automático usa los Hz de tu monitor y baja solo si el equipo no da para más.")
-        self._combo_fps.setToolTip(ayuda_fps)
+        self._combo_fps.setToolTip("Fotogramas por segundo al desplazar el texto: más = más fluido, pero gasta algo "
+                                   "más. Automático usa los Hz de tu monitor y baja solo si el equipo no da para más.")
         self._lbl_fps = QLabel()
-        self._lbl_fps.setMinimumWidth(90)
+        self._lbl_fps.setObjectName("dDato")
         self._lbl_fps.setToolTip("Fotogramas por segundo que se están usando")
+        self._btn_guia = D.boton("Lectura al centro", "rows-3", "Pone la línea de lectura a media altura de la "
+                                 "pantalla, a la altura del objetivo de la cámara si usas el cristal", checkable=True)
+        self._btn_barra = D.boton("Barra de avance", "gauge", "Muestra a la derecha por dónde vas del texto. Púlsala "
+                                                              "o arrástrala para saltar.", checkable=True)
+        self._combo_mic = diseno.ComboElidido()
+        self._combo_mic.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._combo_mic.setToolTip("Micrófono que escucha el modo Smart")
+        self._combo_mic.addItem("Predeterminado de Windows", "")
+        self._combo_revisar = diseno.ComboElidido()
+        self._combo_revisar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for nivel, nombre in REVISAR_OPCIONES:
+            self._combo_revisar.addItem(nombre, nivel)
+        self._combo_revisar.setToolTip("Con Smart, Cronista compara lo que dices con el guion. Silencioso: solo al "
+                                       "pausar. Discreto: además, una rayita ámbar en la barra de avance. Atento: "
+                                       "además, un punto junto a la frase. Nunca te para ni muestra ventanas.")
         self._slider_angulo = QSlider(Qt.Orientation.Horizontal)
         self._slider_angulo.setRange(ANGLE_MIN, ANGLE_MAX)
         self._slider_angulo.setPageStep(5)
-        self._slider_angulo.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self._slider_angulo.setTickInterval(10)
-        self._slider_angulo.setFixedWidth(180)
         self._slider_angulo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         ayuda_angulo = ("Si miras la pantalla desde arriba (o desde abajo), inclina el texto para que desde tu "
                         "posición se vea recto, sin mover el monitor. Hacia la derecha: estás por encima; hacia "
                         "la izquierda: por debajo. Doble clic en el número: volver a 0°.")
         self._slider_angulo.setToolTip(ayuda_angulo)
         self._lbl_angulo = _EtiquetaDobleClic()
-        self._lbl_angulo.setMinimumWidth(130)
+        self._lbl_angulo.setObjectName("dDato")
         self._lbl_angulo.setToolTip(ayuda_angulo)
-        self._btn_pantalla = _boton("⛶ Pantalla completa", "Pantalla completa (F11). En pantalla completa, "
-                                                           "Esc sale.")
-        self._btn_smart = _boton("🎙 Smart", "Modo Smart: el texto sigue tu voz. Avanza mientras lees en voz alta y "
-                                            "se para si te callas o improvisas. Todo en tu PC, sin internet (la "
-                                            "primera vez baja un modelo de voz de unos 40 MB).", checkable=True)
-        self._btn_camara = _boton("📷 Junto a la cámara", "Convierte la ventana en una franja siempre encima, arriba "
-                                                         "de la pantalla, bajo la webcam: lees mirando casi al lente. "
-                                                         "Arrastra la barra para moverla y la esquina para cambiar su "
-                                                         "tamaño. K o Esc: volver.", checkable=True)
-        self._lbl_oido = QLabel()
-        self._lbl_oido.setMinimumWidth(260)
-        self._lbl_oido.setToolTip("Modo Smart: el volumen que llega del micrófono y las últimas palabras que entendí. "
-                                  "Si no se mueve al hablar, elige otro micrófono en «Micrófono».")
-        self._lbl_oido.hide()
-        self._combo_mic = QComboBox()
-        self._combo_mic.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._combo_mic.setToolTip("Micrófono que escucha el modo Smart")
-        self._combo_mic.addItem("Predeterminado de Windows", "")
-        from PySide6.QtWidgets import QSizeGrip
-        self._grip = QSizeGrip(self._bar)
-        self._grip.setToolTip("Arrastra para cambiar el tamaño de la franja")
-        self._grip.hide()
-        self._lbl_progreso = QLabel("0 %")
-        self._lbl_progreso.setToolTip("Progreso de la lectura")
+        self._btn_espejo = D.boton("Espejo", "flip-horizontal-2", "Refleja el texto en horizontal para el cristal del "
+                                                                  "teleprompter (M)", checkable=True)
 
-        for w in (self._btn_editar, self._btn_abrir, self._btn_borrar, _separador(), self._btn_play,
-                  self._btn_smart, self._lbl_oido, self._btn_inicio, self._btn_marca, self._btn_quitar_marcas, _separador(),
-                  QLabel("Velocidad"),
-                  self._slider, self._lbl_velocidad, self._lbl_tiempo):
-            fila.addWidget(w)
-        fila.addStretch(1)
-        fila.addWidget(self._lbl_progreso)
-        for w in (QLabel("Tipo de letra"), self._combo_fuente, QLabel("Tamaño"), self._spin,
-                  QLabel("Espaciado"), self._spin_espaciado, _separador(), QLabel("Fluidez"), self._combo_fps,
-                  self._lbl_fps, _separador(), QLabel("Cuenta atrás"), self._combo_cuenta, _separador(),
-                  QLabel("Micrófono"), self._combo_mic):
-            aspecto.addWidget(w)
-        aspecto.addStretch(1)
-        for w in (self._btn_espejo, self._btn_centrar, self._btn_frases, self._btn_guia, self._btn_barra, _separador(),
-                  QLabel("Ángulo de visión"), self._slider_angulo, self._lbl_angulo):
-            vista.addWidget(w)
-        vista.addStretch(1)
+        for combo in (self._combo_fuente, self._combo_cuenta, self._combo_fps, self._combo_mic, self._combo_revisar):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+            combo.view().setMinimumWidth(300)        # la lista desplegada, con los nombres enteros
+            combo.setProperty("ayuda", combo.toolTip())
+        contenido = QWidget()
+        contenido.setObjectName("ajustesContenido")
+        col = QVBoxLayout(contenido)
+        col.setContentsMargins(D.M3, D.M3, D.M3, D.M3)
+        col.setSpacing(D.M1 + 2)
+
+        def seccion(nombre: str) -> None:
+            if col.count():
+                col.addSpacing(D.M2)
+            col.addWidget(D.linea())
+            col.addWidget(D.titulo(nombre))
+
+        def fila_ajuste(nombre: str, *widgets) -> None:
+            h = QHBoxLayout()
+            h.setSpacing(D.M2)
+            h.addWidget(D.etiqueta(nombre))
+            for w in widgets:
+                h.addWidget(w, 1 if w is widgets[0] else 0)
+            col.addLayout(h)
+
+        def debajo(w: QLabel) -> None:
+            """Un dato bajo el control de la fila de arriba, alineado con él."""
+            w.setWordWrap(True)
+            h = QHBoxLayout()
+            h.setSpacing(D.M2)
+            h.addSpacing(D.ANCHO_ETIQUETA + D.M2)
+            h.addWidget(w, 1)
+            col.addLayout(h)
+
+        def interruptores(*botones) -> None:
+            from PySide6.QtWidgets import QGridLayout
+            g = QGridLayout()
+            g.setContentsMargins(0, 2, 0, 2)
+            g.setSpacing(D.M1)
+            for i, b in enumerate(botones):
+                g.addWidget(b, i // 2, i % 2)
+            col.addLayout(g)
+
+        seccion("Texto")
+        fila_ajuste("Tipo de letra", self._combo_fuente)
+        fila_ajuste("Tamaño", self._spin)
+        fila_ajuste("Espaciado", self._spin_espaciado)
+        interruptores(self._btn_centrar, self._btn_frases)
+        seccion("Lectura")
+        fila_ajuste("Cuenta atrás", self._combo_cuenta)
+        fila_ajuste("Fluidez", self._combo_fps)
+        debajo(self._lbl_fps)
+        interruptores(self._btn_guia, self._btn_barra)
+        seccion("Smart")
+        fila_ajuste("Micrófono", self._combo_mic)
+        fila_ajuste("Revisar lectura", self._combo_revisar)
+        seccion("Pantalla")
+        fila_ajuste("Ángulo de visión", self._slider_angulo)
+        debajo(self._lbl_angulo)
+        interruptores(self._btn_espejo)
+        col.addStretch(1)
         from cronista import SUPPORT_URL
         if SUPPORT_URL:
-            b_apoyo = _boton("♥ Apoyar", "Cronista es gratis. Si te sirve, puedes invitarme un café (se abre "
-                                         "la página en tu navegador).")
+            b_apoyo = D.boton("Apoyar", "heart", "Cronista es gratis. Si te sirve, puedes invitarme un café (se abre "
+                                                 "la página en tu navegador).", tipo="plano")
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
             b_apoyo.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(SUPPORT_URL)))
-            vista.addWidget(b_apoyo)
-        vista.addWidget(self._btn_camara)
-        vista.addWidget(self._btn_pantalla)
-        vista.addWidget(self._grip, 0, Qt.AlignmentFlag.AlignBottom)
-        capas.addLayout(fila)
-        capas.addLayout(aspecto)
-        capas.addLayout(vista)
+            col.addWidget(b_apoyo, 0, Qt.AlignmentFlag.AlignLeft)
+
+        from PySide6.QtWidgets import QScrollArea
+        self._ajustes = QScrollArea()
+        self._ajustes.setObjectName("ajustesScroll")
+        self._ajustes.setStyleSheet(estilo)
+        self._ajustes.setWidget(contenido)
+        self._ajustes.setWidgetResizable(True)
+        self._ajustes.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._ajustes.setFrameShape(QFrame.Shape.NoFrame)
+        # Ancho: lo que pide el contenido (nada se corta), como mínimo 300 px; más la barra vertical si hiciera falta.
+        self._ajustes.setFixedWidth(max(D.ANCHO_PANEL, contenido.minimumSizeHint().width() + 10))
 
     def _connect(self) -> None:
         self._btn_editar.toggled.connect(self._set_editing)
+        self._btn_ajustes.toggled.connect(self._on_ajustes)
         self._btn_abrir.clicked.connect(lambda: self._abrir_dialogo())
         self._btn_play.clicked.connect(lambda: self._pulsar_play())
         self._btn_inicio.clicked.connect(lambda: self._rebobinar())
         self._combo_cuenta.currentIndexChanged.connect(self._on_cuenta)
+        self._combo_revisar.currentIndexChanged.connect(self._on_revisar)
+        self._btn_revisar.clicked.connect(lambda: self._ir_a_revisar())
         self._btn_smart.toggled.connect(self._on_smart)
         self._combo_mic.currentIndexChanged.connect(self._on_mic)
         self._btn_camara.toggled.connect(self._on_camara)
@@ -496,6 +611,78 @@ class TeleprompterWindow(QMainWindow):
         self._editor.textChanged.connect(self._on_editor_changed)
         self._editor.textChanged.connect(self._actualizar_boton_borrar)
 
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        # Al cambiar de ancho, o cuando algo de la barra aparece o cambia de texto («para revisar», lo que oye Smart),
+        # se recalcula cuánto cabe. El cálculo no prueba niveles: así no entra en bucle con sus propios cambios.
+        if obj is getattr(self, "_bar", None) and event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            self._compactar_barra(self._bar.width())
+        return super().eventFilter(obj, event)
+
+    def _ahorro_nivel(self, nivel: int) -> int:
+        """Cuántos px se ganan al pasar del nivel anterior a este (medido con la letra de la barra)."""
+        fm = QFontMetrics(self._fuente_barra)
+        if nivel == 1:
+            return fm.horizontalAdvance("Velocidad") + fm.horizontalAdvance("100 %") + 2 * diseno.M2 + 8
+        if nivel == 2:
+            revisar = (fm.horizontalAdvance(" para revisar") if self._btn_revisar.isVisibleTo(self._bar) else 0)
+            return fm.horizontalAdvance("Smart") + 12 + revisar + 50
+        if nivel == 3:
+            return fm.horizontalAdvance(self._lbl_tiempo.text() or "0:00 / 0:00 · faltan 0:00") + diseno.M2 + 80
+        return 0
+
+    def _bar_minimo(self) -> int:
+        """Ancho mínimo de la barra en su nivel más compacto (sea cual sea el nivel en que esté ahora)."""
+        actual = getattr(self, "_bar_nivel", 0)
+        completo = self._bar.minimumSizeHint().width() + sum(self._ahorro_nivel(n) for n in range(1, actual + 1))
+        return completo - sum(self._ahorro_nivel(n) for n in range(1, 4))
+
+    def _compactar_barra(self, ancho: int) -> None:
+        """Si la barra no cabe, se compacta por pasos: 1) sin «Velocidad» ni el %; 2) Smart y «para revisar» solo
+        con icono y deslizador más corto; 3) sin el tiempo ni lo que oye Smart. Lo quitado sigue en los tooltips."""
+        if ancho <= 0:
+            return
+        actual = getattr(self, "_bar_nivel", 0)
+        completo = self._bar.minimumSizeHint().width() + sum(self._ahorro_nivel(n) for n in range(1, actual + 1))
+        nivel, necesario = 0, completo
+        while nivel < 3 and necesario > ancho:
+            nivel += 1
+            necesario -= self._ahorro_nivel(nivel)
+        self._aplicar_nivel_barra(nivel)
+
+    def _aplicar_nivel_barra(self, nivel: int) -> None:
+        if nivel == getattr(self, "_bar_nivel", 0):
+            return
+        self._bar_nivel = nivel
+        self._lbl_vel_titulo.setVisible(nivel < 1)
+        self._lbl_progreso.setVisible(nivel < 1)
+        solo_icono = nivel >= 2
+        self._btn_smart.setObjectName("dIcono" if solo_icono else "")
+        self._btn_smart.style().unpolish(self._btn_smart)
+        self._btn_smart.style().polish(self._btn_smart)
+        self._btn_smart.setText("" if solo_icono else "Smart")
+        if solo_icono:
+            self._btn_smart.setFixedWidth(diseno.ALTO_CONTROL + 2)
+        else:
+            self._btn_smart.setMinimumWidth(0)
+            self._btn_smart.setMaximumWidth(16777215)
+        self._texto_revisar()
+        self._slider.setFixedWidth(100 if solo_icono else 150)
+        self._lbl_tiempo.setVisible(nivel < 3)
+        self._lbl_oido.setMinimumWidth(0 if nivel >= 3 else 80)
+        self._lbl_oido.setMaximumWidth(0 if nivel >= 3 else 320)
+
+    def _texto_revisar(self) -> None:
+        n = getattr(self, "_revisar_n", 0)
+        self._btn_revisar.setText(str(n) if getattr(self, "_bar_nivel", 0) >= 2 else f"{n} para revisar")
+
+    def _on_ajustes(self, on: bool) -> None:
+        """Abre o cierra el panel de ajustes. El texto se vuelve a maquetar al nuevo ancho sin perder la frase."""
+        self._tp.settings_panel = bool(on)
+        self._guardar_ajustes_pronto()
+        self._ajustes.setVisible(on)
+        self._canvas.place()
+        self._devolver_foco()
+
     def _install_shortcuts(self) -> None:
         """Atajos de lectura: su padre es la vista y el contexto exige que la vista (o un hijo) tenga el foco.
         Así, en la página de edición (la vista está oculta) la barra espaciadora escribe espacios."""
@@ -517,6 +704,8 @@ class TeleprompterWindow(QMainWindow):
             ("F", lambda: self._btn_frases.toggle()),
             ("L", lambda: self._cycle_font(1)),
             ("Shift+L", lambda: self._cycle_font(-1)),
+            ("R", lambda: self._toma_mala()),
+            ("A", lambda: self._btn_ajustes.toggle()),
         ]
         globales = [
             ("F11", lambda: self._alternar_pantalla()),
@@ -716,6 +905,12 @@ class TeleprompterWindow(QMainWindow):
 
     def _on_playing(self, playing: bool) -> None:
         self._actualizar_boton_play()
+        if playing:
+            self._asegurar_sesion().event("lectura", smart=self._btn_smart.isChecked())
+        elif self._sesion is not None:
+            self._evaluar_pendientes()
+            self._sesion.event("pausa")
+        self._actualizar_revisar()
         if self._btn_smart.isChecked():
             if playing:
                 self._smart_escuchar()
@@ -726,14 +921,145 @@ class TeleprompterWindow(QMainWindow):
         self._lbl_progreso.setText(f"{round(p * 100)} %")
         self._actualizar_tiempo()
 
+    # ---- toma mala, registro de la sesión y frases para revisar ------------------
+    def _asegurar_sesion(self) -> ensayo.SessionLog:
+        """El registro de esta lectura (uno nuevo si el texto cambió). Va a %APPDATA%\\Cronista\\sesiones."""
+        texto = self._view.text()
+        if self._sesion is None or not self._sesion.matches(texto):
+            self._sesion = ensayo.SessionLog(paths.data_dir() / "sesiones", texto)
+            self._oido_frase, self._frase_actual = [], None
+        return self._sesion
+
+    def _toma_mala(self) -> None:
+        """R: la frase salió mal. Se apunta, el texto vuelve al principio de la frase y, tras una cuenta atrás
+        corta, se sigue leyendo. Sin preguntas ni ventanas: solo un «↺» que se desvanece."""
+        texto = self._view.text()
+        if not texto.strip() or self._editing:
+            return
+        sesion = self._asegurar_sesion()
+        smart_activo = self._btn_smart.isChecked() and self._follower is not None
+        pos = self._follower.position() if smart_activo else self._view.reading_pos()
+        i = ensayo.sentence_at(sesion.spans, pos)
+        if i < 0:
+            return
+        if smart_activo and i > 0 and pos - sesion.spans[i][0] < 3:
+            i -= 1                       # acaba de terminar la frase anterior: esa es la que salió mal
+        self._cancelar_cuenta()
+        self._view.jump_to_mark(sesion.spans[i][0])
+        self._smart_reubicar()
+        sesion.event("toma_mala", frase=i)
+        self._mostrar_aviso_breve("↺ Toma mala")
+        self.start_reading(segundos=int(self._tp.retake_countdown_s))
+
+    def _mostrar_aviso_breve(self, texto: str) -> None:
+        self._aviso.setText(texto)
+        self._canvas.place()
+        self._aviso.show()
+        self._aviso_breve_n = getattr(self, "_aviso_breve_n", 0) + 1
+        QTimer.singleShot(1000, lambda n=self._aviso_breve_n: self._ocultar_aviso_breve(n))
+
+    def _ocultar_aviso_breve(self, n: int) -> None:
+        if n == self._aviso_breve_n:             # (si entretanto salió otro aviso, ese manda)
+            self._aviso.hide()
+            self._aviso.setText(HINT_TEXT)
+
+    def _evaluar_frase(self, texto: str) -> None:
+        """Con Smart: al pasar a otra frase, compara lo oído en la anterior con lo escrito (en silencio)."""
+        if self._tp.review_level == "apagado" or self._follower is None:
+            return
+        sesion = self._asegurar_sesion()
+        i = ensayo.sentence_at(sesion.spans, self._follower.position())
+        if self._frase_actual is None or i < self._frase_actual:
+            self._frase_actual = i
+            return
+        if i == self._frase_actual:
+            return
+        if self._revisor is None or self._revisor_texto != texto:
+            desconocidas = getattr(self._oyente, "unknown_words", set()) if self._oyente is not None else set()
+            formas = getattr(self._oyente, "spoken_forms", {}) if self._oyente is not None else {}
+            self._revisor = ensayo.ReadingChecker(texto, self._tp.review_sensitivity, self._smart_idioma(),
+                                                  desconocidas, formas)
+            self._revisor_texto = texto
+        # Las frases terminadas, menos la última: esa se juzga cuando termine la siguiente, porque hasta entonces no
+        # se sabe si lo oído era de ella o de otra casi igual que venía después. (La marca llega una frase más tarde.)
+        if i - self._frase_actual < 2:
+            return
+        # La frase en la que va ahora también entra, sin juzgarse: lo que ya se oyó de ella no se atribuye a una
+        # anterior que acabe igual (saltarse una frase y leer «…para ver el MP3» completaba «para ver el
+        # juego» de la anterior, y a la actual le faltaba el principio).
+        frases = list(range(self._frase_actual, i + 1))
+        sospechosas, usadas = self._revisor.evaluate(frases, self._oido_frase, pending=2)
+        frases = frases[:-2]
+        for k in frases:
+            if k in sospechosas and sospechosas[k] == [ensayo.NOT_READ] and sesion.read_ok_before(k):
+                continue                                 # ya se leyó bien antes: saltársela al repasar no es error
+            if k in sospechosas:
+                sesion.event("posible_error", frase=k, faltan=sospechosas[k], oido=self._oido_frase[-30:])
+            else:
+                sesion.event("frase_bien", frase=k)
+        self._oido_frase = self._oido_frase[usadas:]    # lo que sobra es de la frase pendiente o de la actual
+        self._frase_actual = i - 1
+        self._actualizar_revisar()
+
+    def _evaluar_pendientes(self, pos: int | None = None) -> None:
+        """Al pausar, terminar o volver atrás: se juzgan las frases ya terminadas que esperaban a la siguiente.
+        pos: hasta dónde se había leído (por defecto, donde va el seguidor)."""
+        if (self._tp.review_level == "apagado" or self._follower is None or self._frase_actual is None
+                or self._revisor is None or self._sesion is None):
+            return
+        pos = self._follower.position() if pos is None else pos
+        i = ensayo.sentence_at(self._sesion.spans, pos)
+        if i >= 0 and pos >= self._sesion.spans[i][1] - 2:
+            i += 1                                       # la frase en la que va también está terminada
+        frases = list(range(self._frase_actual, min(i, len(self._sesion.spans))))
+        if not frases:
+            return
+        actual = [i] if i < len(self._sesion.spans) else []     # la que está a medias ayuda a repartir, sin juzgarse
+        sospechosas, usadas = self._revisor.evaluate(frases + actual, self._oido_frase, pending=len(actual))
+        for k in frases:
+            if k in sospechosas and sospechosas[k] == [ensayo.NOT_READ] and self._sesion.read_ok_before(k):
+                continue                                 # ya se leyó bien antes: saltársela al repasar no es error
+            if k in sospechosas:
+                self._sesion.event("posible_error", frase=k, faltan=sospechosas[k], oido=self._oido_frase[-30:])
+            else:
+                self._sesion.event("frase_bien", frase=k)
+        self._oido_frase = self._oido_frase[usadas:]
+        self._frase_actual = frases[-1] + 1
+
+    def _actualizar_revisar(self) -> None:
+        nivel = self._tp.review_level
+        frases = self._sesion.to_review() if self._sesion is not None and nivel != "apagado" else []
+        posiciones = [self._sesion.spans[i][0] for i in frases] if frases else []
+        self._view.set_review(posiciones, nivel)
+        visible = bool(frases) and (nivel != "silencioso" or not self._view.is_playing())
+        self._revisar_n = len(frases)
+        self._texto_revisar()
+        self._btn_revisar.setVisible(visible)
+
+    def _ir_a_revisar(self) -> None:
+        """Lleva a la siguiente frase para revisar (tras la línea de lectura; tras la última, la primera)."""
+        marcas = self._view.review_marks()
+        if not marcas:
+            return
+        actual = self._view.reading_pos()
+        siguientes = [p for p in marcas if p > actual]
+        self._view.jump_to_mark(siguientes[0] if siguientes else marcas[0])
+        self._smart_reubicar()
+        self._devolver_foco()
+
+    def _on_revisar(self, indice: int) -> None:
+        self._tp.review_level = self._combo_revisar.itemData(indice) or "discreto"
+        self._actualizar_revisar()
+        self._guardar_ajustes_pronto()
+
     # ---- inicio con cuenta atrás ---------------------------------------------
-    def start_reading(self) -> None:
+    def start_reading(self, segundos: int | None = None) -> None:
         """Empieza a leer. Con cuenta atrás (ajuste «Cuenta atrás») muestra 3, 2, 1 antes de mover el texto."""
         if self._view.is_playing() or self.is_counting_down():
             return
         if self._btn_smart.isChecked() and not self._smart_listo():
             return                       # (se ofrece bajar el modelo; al terminar, el usuario pulsa Iniciar)
-        segundos = int(self._tp.countdown_s)
+        segundos = int(self._tp.countdown_s if segundos is None else segundos)
         if segundos <= 0:
             self._view.play()
             return
@@ -785,12 +1111,14 @@ class TeleprompterWindow(QMainWindow):
 
     def _actualizar_boton_play(self) -> None:
         if self.is_counting_down():
-            texto = "✕ Cancelar"
+            texto, nombre = "Cancelar", "x"
         elif self._view.is_playing():
-            texto = "⏸ Pausar"
+            texto, nombre = "Pausar", "pause"
         else:
-            texto = "▶ Iniciar"
+            texto, nombre = "Iniciar", "play"
         self._btn_play.setText(texto)
+        if self._btn_play.property("icono_nombre") != nombre:
+            diseno.poner_icono(self._btn_play, nombre, diseno.SOBRE_ACENTO)
 
     # ---- indicador de tiempo -------------------------------------------------
     def _actualizar_tiempo(self) -> None:
@@ -802,11 +1130,11 @@ class TeleprompterWindow(QMainWindow):
         """Tiempo leído / total a la velocidad actual, y lo que falta. Sin texto (o sin medida) muestra «—»."""
         px_s = tp_text.speed_to_px_per_s(self._view.speed(), self._view.line_height())
         if not self._view.text().strip() or px_s <= 0:
-            return "⏱ —"
+            return "—"
         transcurrido = self._view.offset() / px_s
         total = self._view.max_offset() / px_s
         falta = max(0.0, total - transcurrido)
-        return (f"⏱ {formato_tiempo(transcurrido)} / {formato_tiempo(total)} · "
+        return (f"{formato_tiempo(transcurrido)} / {formato_tiempo(total)} · "
                 f"faltan {formato_tiempo(falta)}")
 
     def _on_editor_changed(self) -> None:
@@ -914,7 +1242,9 @@ class TeleprompterWindow(QMainWindow):
         if full == self._last_full:
             return
         self._last_full = full
-        self._btn_pantalla.setText("⛶ Salir de pantalla completa" if full else "⛶ Pantalla completa")
+        diseno.poner_icono(self._btn_pantalla, "minimize" if full else "maximize")
+        self._btn_pantalla.setToolTip("Salir de pantalla completa (F11 o Esc)" if full else
+                                      "Pantalla completa (F11). En pantalla completa, Esc sale.")
         self.statusBar().setVisible(not full)
         if full:
             self._aviso.show()
@@ -969,7 +1299,8 @@ class TeleprompterWindow(QMainWindow):
             self.statusBar().hide()
             self._grip.show()
             self.show()
-            self._btn_camara.setText("📷 Volver a la ventana")
+            self._btn_camara.setToolTip("Volver a la ventana (K o Esc)")
+            self._ajustes.hide()                 # en la franja no cabe: vuelve al salir si estaba abierto
         else:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.FramelessWindowHint
                                 & ~Qt.WindowType.WindowStaysOnTopHint)
@@ -978,7 +1309,9 @@ class TeleprompterWindow(QMainWindow):
             if self._camara_geo is not None:
                 self.setGeometry(self._camara_geo)
             self.show()
-            self._btn_camara.setText("📷 Junto a la cámara")
+            self._btn_camara.setToolTip("Junto a la cámara (K): la ventana se vuelve una franja siempre encima, "
+                                        "arriba de la pantalla, bajo la webcam. K o Esc: volver.")
+            self._ajustes.setVisible(self._btn_ajustes.isChecked())
         self._aplicar_cromo()
         self._canvas.place()
         self._devolver_foco()
@@ -1001,12 +1334,14 @@ class TeleprompterWindow(QMainWindow):
             self._view.pause()
         self._smart_callar()
         self._view.set_follow(on)
+        if not on:
+            self._view.set_hard_words([])                # el subrayado solo tiene sentido con Smart
         self._lbl_oido.setVisible(on)
-        self._lbl_oido.setText("🎙 pulsa Iniciar y lee en voz alta" if on else "")
+        self._lbl_oido.setText("pulsa Iniciar y lee en voz alta" if on else "")
         if on:
             if not self._smart_listo():
                 return
-            self.statusBar().showMessage("🎙 Smart: pulsa Iniciar y lee en voz alta; el texto te sigue.", 6000)
+            self.statusBar().showMessage("Smart: pulsa Iniciar y lee en voz alta; el texto te sigue.", 6000)
         else:
             self.statusBar().showMessage("Smart apagado: pulsa Iniciar y el texto sube a la velocidad elegida.", 5000)
         log.info("Smart %s", "encendido" if on else "apagado")
@@ -1022,7 +1357,7 @@ class TeleprompterWindow(QMainWindow):
         self._combo_mic.blockSignals(False)
         self._lbl_oido.setVisible(self._btn_smart.isChecked())
         if self._btn_smart.isChecked():
-            self._lbl_oido.setText("🎙 pulsa Iniciar y lee en voz alta")
+            self._lbl_oido.setText("pulsa Iniciar y lee en voz alta")
 
     def _on_mic(self, _i: int) -> None:
         self._tp.smart_mic = self._combo_mic.currentData() or ""
@@ -1040,11 +1375,11 @@ class TeleprompterWindow(QMainWindow):
         if not self._view.is_playing():
             return
         if ahora - self._oido_ultimo > 4.0:
-            self._lbl_oido.setText("🎙 no te oigo: revisa el micrófono")
+            self._lbl_oido.setText("no te oigo: revisa el micrófono")
             return
         barras = "▁▂▃▄▅▆▇█"
         barra = barras[min(len(barras) - 1, int(nivel * 3 * len(barras)))]
-        self._lbl_oido.setText(f"🎙 {barra} {self._oido_palabras}")
+        self._lbl_oido.setText(f"{barra} {self._oido_palabras}")
 
     def _smart_idioma(self) -> str:
         from cronista.teleprompter import smart
@@ -1117,6 +1452,7 @@ class TeleprompterWindow(QMainWindow):
 
     def _smart_reubicar(self) -> None:
         """El usuario movió el texto a mano: la voz sigue desde la línea de lectura."""
+        self._oido_frase, self._frase_actual = [], None      # se vuelve a empezar a comparar desde ahí
         if self._follower is not None:
             self._follower.reset(self._view.reading_pos())
 
@@ -1131,7 +1467,9 @@ class TeleprompterWindow(QMainWindow):
         if self._oyente is None:
             self._oyente = smart.VoiceListener(self)
             self._oyente.heard.connect(self._smart_oido)
+            self._oyente.heard_final.connect(self._smart_oido_final)     # (método: Qt lo trae al hilo de la ventana)
             self._oyente.error.connect(self._smart_error)
+            self._oyente.analysed.connect(self._smart_analizado)
             self._oyente.level.connect(self._smart_nivel)
         import time as _t
         self._oido_ultimo = _t.monotonic()
@@ -1139,32 +1477,68 @@ class TeleprompterWindow(QMainWindow):
         idioma = self._smart_idioma()
         mic = self._tp.smart_mic or None
         log.info("Smart: escuchando (idioma %s, micrófono %s)", idioma, mic or "predeterminado")
-        self._oyente.start(idioma, mic)
-        self._lbl_oido.setText("🎙 escuchando…")
-        self.statusBar().showMessage("🎙 Escuchando… lee en voz alta.", 4000)
+        self._oyente.start(idioma, mic, smart.script_vocabulary(texto, idioma), smart.acronyms(texto))
+        self._lbl_oido.setText("escuchando…")
+        self.statusBar().showMessage("Escuchando… lee en voz alta.", 4000)
+
+    def _smart_analizado(self) -> None:
+        """El oyente ya sabe qué palabras del guion no conoce el modelo: el seguidor y el revisor aprenden a juntar
+        las piezas con que se oyen («in jugable», «o ene u»), y las que no tienen arreglo se subrayan (discreto)."""
+        from cronista.teleprompter import smart
+        if self._oyente is None:
+            return
+        formas = getattr(self._oyente, "spoken_forms", {})
+        if self._follower is not None:
+            self._follower.set_spoken_forms(formas)
+        self._revisor = None                             # se rehace con las piezas al juzgar la próxima frase
+        sin_arreglo = {w for w in getattr(self._oyente, "unknown_words", set()) if w not in formas}
+        texto = self._view.text()
+        spans = [(a, b) for _, a, b in smart.tokenize(texto) if texto[a:b].lower() in sin_arreglo]
+        self._view.set_hard_words(spans if self._btn_smart.isChecked() else [])
+        if spans:
+            nombres = sorted({texto[a:b] for a, b in spans}, key=str.lower)
+            self._btn_smart.setToolTip(SMART_TIP + "\n\nNo puede oír (subrayadas): " + ", ".join(nombres[:12])
+                                       + (" …" if len(nombres) > 12 else ""))
+        else:
+            self._btn_smart.setToolTip(SMART_TIP)
 
     def _smart_callar(self) -> None:
         if self._oyente is not None and self._oyente.is_running():
             self._oyente.stop()
             if self._btn_smart.isChecked():
-                self._lbl_oido.setText("🎙 en pausa")
+                self._lbl_oido.setText("en pausa")
 
-    def _smart_oido(self, palabras: list) -> None:
+    def _smart_oido_final(self, palabras: list) -> None:
+        """Un trozo que el reconocedor dio por cerrado: el seguidor lo recuerda para enlazarlo con el siguiente, y se
+        guarda para comparar la frase con el guion cuando se pase a la siguiente."""
+        self._smart_oido(palabras, final=True)
+        if self._follower is not None and self._view.is_playing():
+            self._oido_frase.extend(str(p) for p in palabras)
+            self._evaluar_frase(self._view.text())
+
+    def _smart_oido(self, palabras: list, final: bool = False) -> None:
         if self._follower is None or not self._view.is_playing():
             return
         self._oido_palabras = "«" + " ".join(str(p) for p in palabras[-4:]) + "»"
         import time as _t
         self._oido_ultimo = _t.monotonic()          # (si entiende palabras, el micrófono funciona)
-        self._lbl_oido.setText(f"🎙 {self._oido_palabras}")
-        pos = self._follower.feed([str(p) for p in palabras])
+        self._lbl_oido.setText(f"{self._oido_palabras}")
+        antes = self._follower.position()
+        pos = self._follower.feed([str(p) for p in palabras], final=final)
         if pos is not None:
+            if self._follower.jumped and pos < antes:
+                # Volvió atrás a releer: lo leído hasta ahí se juzga ya (si no, la frase pendiente se perdía y
+                # luego salía como «sin leer») y se empieza a comparar de nuevo desde donde está ahora.
+                self._evaluar_pendientes(antes)
+                self._oido_frase, self._frase_actual = [], None
+                self._actualizar_revisar()
             self._view.follow_to(pos, back=self._follower.jumped)
 
     def _smart_error(self, mensaje: str) -> None:
         log.warning("Smart: %s", mensaje)
-        self._lbl_oido.setText("🎙 ✗ " + mensaje[:60])
+        self._lbl_oido.setText("✗ " + mensaje[:60])
         self._view.pause()
-        self.statusBar().showMessage(f"🎙 {mensaje}", 10000)
+        self.statusBar().showMessage(f"{mensaje}", 10000)
         QMessageBox.warning(self, "Modo Smart", mensaje)
 
     # ---- eventos de ventana -------------------------------------------------

@@ -159,6 +159,8 @@ class AISettings:
 @dataclass
 class TeleprompterSettings:
     """Teleprompter (función principal desde la 0.2). El texto se guarda aparte, en teleprompter.txt."""
+    settings_panel: bool = True        # panel de ajustes abierto a la derecha (botón Ajustes o A)
+    intro_animation: bool = True       # al abrir: ventana de arranque con una onda de luz (~1 s; False = abre directo)
     font_size: int = 56                # puntos
     font_family: str = "Segoe UI"      # una de teleprompter.fonts.FONT_OPTIONS
     letter_spacing: int = 0            # % extra de separación entre letras (0-50)
@@ -178,6 +180,9 @@ class TeleprompterSettings:
     smart_mic: str = ""                # micrófono del modo Smart ("" = el predeterminado de Windows)
     smart: bool = False                # modo Smart: el texto sigue la voz (reconocimiento local con Vosk)
     countdown_s: int = 3               # cuenta atrás (segundos) antes de empezar a leer; 0 = empieza enseguida
+    retake_countdown_s: int = 2        # cuenta atrás al repetir una frase con «toma mala» (R); 0 = enseguida
+    review_level: str = "discreto"     # posibles errores al leer con Smart: apagado | silencioso | discreto | atento
+    review_sensitivity: str = "media"  # baja | media | alta (cuánto tiene que faltar para sospechar)
     last_file: str = ""                # último archivo abierto (para empezar el diálogo en su carpeta)
 
 

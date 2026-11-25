@@ -1,6 +1,8 @@
 # Cronista
 
-Manual completo del teleprompter.
+Desde la versión 0.2 (26/10/2026), Cronista es ante todo un **teleprompter**. El asistente de notas por voz
+(todo lo que se describe más abajo) sigue en el código, pero en pausa: se abre con `--notas` y necesita
+reinstalar todo `requirements.txt` y los modelos (ver `notas_claude/aprendizajes.md`, «Cómo reanudar»).
 
 ## Teleprompter
 
@@ -15,6 +17,40 @@ con `run_cronista.bat`.
   Vosk en un hilo). El modelo pequeño (es/en, ~40 MB, según el idioma del texto) se baja la primera vez a
   `%APPDATA%\Cronista\modelos`. El micrófono solo se abre mientras se lee. La vista: `set_follow`/`follow_to`
   (va suave a la línea dicha, τ = 0,35 s; mover a mano reubica). Probado con una narración real: la siguió al 100 %.
+  Desde la 0.11: el reconocedor se limita al vocabulario del guion (`script_vocabulary`); el seguidor recuerda los
+  trozos cerrados que aún no sirvieron para avanzar (con voz lenta Vosk corta en trozos de una palabra) y no salta a
+  una frase casi igual si lo oído encaja con lo que se acaba de leer; el texto sube en proporción a lo dicho de cada
+  línea y, entre palabras, sigue un poco al ritmo de habla (≤ 0,9 s, ≤ media línea por delante). Medido con la
+  narración de prueba en versión grave y lenta («voz cansada»): retraso típico de 3,7 s a 1,2 s, sin saltos falsos.
+  Desde la 0.12: las palabras que el modelo no conoce se buscan como piezas que sí conoce y suenan igual
+  (`spoken_pieces`: «cinemáticas» → cinemática, «injugable» → in jugable, «6» → seis, «mp3» → mp tres) y las siglas
+  también se esperan deletreadas («ONU» → o ene u); `SpokenForms` vuelve a juntar las piezas oídas. Con un guion de prueba
+  se oyen injugable, MP3 y ONU 6. Retraso típico con voz cansada: 1,2 s → 0,6 s. Las que siguen sin arreglo
+  se subrayan con puntos grises mientras Smart está encendido (y salen en la ayuda del botón Smart).
+- **Interfaz** (0.14; `teleprompter/diseno.py`): el sistema de diseño de Reclaimer. Abajo, una sola barra (editar,
+  abrir, borrar · al principio, **Iniciar** —el único botón con color de acento—, Smart · marcas y «para revisar» ·
+  velocidad y tiempo · cámara, pantalla completa y Ajustes); a la derecha, el panel de ajustes por secciones (Texto,
+  Lectura, Smart, Pantalla) que se abre y se cierra con el botón o la tecla A. Iconos Lucide monocromos (ISC) y letra
+  Inter (OFL) en `assets/`; nada de emojis en los controles; si la ventana es estrecha la barra se compacta por pasos
+  y los desplegables acaban en «…»: nada se corta.
+- **Icono y arranque** (0.13; `teleprompter/arranque.py`, `tools/icono.py`): icono en la línea de Reclaimer (símbolo
+  geométrico de un color con contorno oscuro: el cristal de un teleprompter visto de frente, con las líneas del guion y
+  la lente de la cámara detrás; versión simplificada hasta 32 px). Ventana de arranque oscura como la de Reclaimer (símbolo en relieve
+  metálico, «Cronista», «Abriendo…»); cuando la principal está montada pasa una onda de luz cálida (0,9 s) y se funde.
+  Un clic o una tecla la saltan; `teleprompter.intro_animation: false` en settings.json la quita. Identificador propio
+  en la barra de tareas (no sale el icono de Python).
+- **Toma mala** (R): vuelve al principio de la frase, la apunta en el registro y sigue tras una cuenta atrás corta
+  («Cuenta atrás al repetir», 2 s por defecto), con solo un «↺» que se desvanece. Sin preguntas ni ventanas.
+- **Revisar lectura** (con Smart; `teleprompter/ensayo.py`): compara lo oído con el guion y apunta las frases donde
+  parece que faltó algo. Nunca te para. Niveles: Apagado · Silencioso (solo al pausar) · Discreto (por defecto:
+  además una rayita ámbar en la barra de avance) · Atento (además un punto junto a la frase). «⚠ N para revisar»
+  salta a la siguiente. Para no dar falsas alarmas: no exige muletillas, nombres propios, palabras en inglés ni las
+  que el modelo no conoce; una palabra suelta nunca se marca; cada frase se juzga cuando ya terminó la siguiente
+  (por si lo oído era de una casi igual), y si el reconocedor está oyendo mal en la sesión exige mucho más. Medido:
+  0 falsas alarmas con lecturas correctas (normal, grave y lenta, con ruido, rápida) y los 3 errores reales
+  provocados detectados (4 palabras de menos, frase saltada, ambos con voz cansada).
+- **Registro de cada sesión** en `%APPDATA%\Cronista\sesiones\AAAA-MM-DD_HH-MM-SS.json`: frases del guion y eventos
+  (lectura, pausa, toma mala, posible error, frase bien) con su segundo. Es la base para pasárselo a Reclaimer.
 - **📷 Junto a la cámara** (K): franja sin bordes, siempre encima, arriba y al centro (60 % × 30 % de la
   pantalla); se mueve arrastrando la barra y cambia de tamaño con la esquina; Esc o K vuelve.
 - **Cronista.exe**: `tools/construir_exe.py` (PyInstaller, carpeta + zip en `Exportados/`, sin Python);
@@ -71,6 +107,7 @@ con `run_cronista.bat`.
 |---|---|
 | Espacio | Iniciar / pausar (al pausar deja la bandera roja) |
 | B | Ir a la siguiente bandera roja |
+| R | Toma mala: repetir la frase |
 | Clic en el margen izquierdo | Poner / quitar una bandera en esa línea |
 | Inicio | Volver al principio |
 | ↑ / ↓ | Más / menos velocidad |

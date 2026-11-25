@@ -48,6 +48,8 @@ WHEEL_FONT_STEP = 4            # puntos por muesca de rueda con Ctrl
 GUIDE_HALF_H = 10.0            # semialto de los triángulos de la línea de lectura (px)
 GUIDE_W = 14.0                 # ancho de los triángulos (px)
 FLAG_COLOR = "#f85149"         # bandera roja: dónde se pausó (para seguir leyendo otro día)
+HARD_WORD_COLOR = "#6e7681"    # gris: subrayado de puntos bajo las palabras que Smart no puede oír
+REVIEW_COLOR = "#d29922"       # ámbar: frase con un posible error de lectura (modo Smart)
 TRACK_W = 6.0                  # barra de avance a la derecha: ancho, separación del borde y márgenes (px)
 TRACK_RIGHT = 26.0
 TRACK_PAD = 16.0
@@ -56,6 +58,10 @@ MARK_ZONE_MIN = 70.0           # ancho mínimo del margen izquierdo donde un cli
 GHOST_ALPHA = 90               # bandera tenue al pasar el ratón por el margen (clic = ponerla)
 _END_EPS = 0.01                # px de tolerancia para dar por alcanzado el final
 FOLLOW_TAU_S = 0.35            # modo Smart: cuánto tarda (constante de tiempo) en llegar a la línea que dices
+FOLLOW_RATE_WINDOW_S = 4.0     # modo Smart: el ritmo de habla se mide con lo oído en los últimos segundos
+FOLLOW_COAST_S = 0.9           # ...y se sigue a ese ritmo como mucho este tiempo tras la última palabra oída
+FOLLOW_MAX_LEAD = 0.5          # ...sin pasar de media línea por delante de ella
+FOLLOW_MAX_RATE_LINES = 2.0    # ...ni de 2 líneas por segundo
 # Caché del texto ya pintado. Por encima de ~64 px Qt dibuja cada letra como un contorno: a 56 pt y 1080p eso
 # costaba ~10 ms por fotograma. Ahora el texto se pinta en una imagen de dos pantallas de alto que cada
 # fotograma solo copia (<1 ms); se vuelve a pintar tras avanzar unas tres cuartas partes de pantalla.
@@ -93,6 +99,10 @@ class _PrompterLogic:
         # Modo Smart: en vez de subir a velocidad fija, el texto va (suave) a la línea que la voz acaba de decir
         self._follow = False
         self._follow_target = 0.0
+        self._follow_heard: list[tuple[float, float]] = []   # (momento, meta) de las últimas palabras oídas
+        self._review_marks: list[int] = []     # frases con un posible error de lectura (dónde empiezan)
+        self._review_level = "discreto"
+        self._hard_words: list[tuple[int, int]] = []   # (inicio, fin) de las palabras que Smart no puede oír
         self.on_manual_move = None    # modo Smart: la ventana se entera de que el usuario movió el texto a mano
 
         self._doc = QTextDocument(self)
@@ -151,6 +161,8 @@ class _PrompterLogic:
         self._doc.setPlainText(self._display_text())
         self._offset = 0.0
         self._follow_target = 0.0
+        self._review_marks = []                     # las frases para revisar eran del texto anterior
+        self._hard_words = []
         self._hover_mark = -1
         self._layout_doc()
         self.clear_marks()
@@ -370,7 +382,8 @@ class _PrompterLogic:
         if not self._playing or dt_s <= 0:
             return
         top = self.max_offset()
-        if self._follow:                   # modo Smart: se acerca (suave) a la línea dicha
+        if self._follow:                   # modo Smart: se acerca (suave) a la palabra dicha
+            self._extrapolate_follow(dt_s)
             meta = clamp(self._follow_target, 0.0, top)
             falta = meta - self._offset
             if abs(falta) <= 0.05:
@@ -391,21 +404,84 @@ class _PrompterLogic:
         """Modo Smart: mientras se lee, el texto no sube a velocidad fija sino que va a donde diga follow_to()."""
         self._follow = bool(on)
         self._follow_target = self._offset
+        self._follow_heard = []
 
     def is_following(self) -> bool:
         return self._follow
 
+    # ---- frases para revisar (posibles errores de lectura) -------------------
+    def set_review(self, positions: list[int], level: str) -> None:
+        """Frases con un posible error (posición donde empiezan) y cómo mostrarlas: «discreto» = rayita ámbar en la
+        barra de avance; «atento» = además un punto junto a la frase; «silencioso»/«apagado» = nada mientras se lee."""
+        self._review_marks = sorted(int(p) for p in positions)
+        self._review_level = level
+        self.update()
+
+    def review_marks(self) -> list[int]:
+        return list(self._review_marks)
+
+    # ---- palabras que Smart no puede oír ------------------------------------
+    def set_hard_words(self, spans: list[tuple[int, int]]) -> None:
+        """Subraya con puntos grises, finos, las palabras (inicio, fin) que el reconocedor no entenderá: ahí el texto
+        no se guía por la voz. Sin avisos ni colores fuertes; [] las quita."""
+        spans = sorted((int(a), int(b)) for a, b in spans if 0 <= a < b <= len(self._text))
+        if spans == self._hard_words:
+            return
+        self._hard_words = spans
+        self._format_doc()
+        self._cache = None
+        self.update()
+
+    def hard_words(self) -> list[tuple[int, int]]:
+        return list(self._hard_words)
+
     def follow_to(self, pos: int, back: bool = False) -> None:
-        """La voz acaba de decir la palabra que acaba en pos: su línea va (suave) a la línea de lectura.
-        Solo hacia adelante, salvo back=True (la voz se encontró con seguridad más atrás: empezó en otra parte)."""
+        """La voz acaba de decir la palabra que acaba en pos: el texto va (suave) a dejarla en la línea de lectura.
+
+        No va al principio de su línea sino en proporción a lo que lleva dicho de ella: así sube de forma continua
+        mientras se lee la línea (antes se quedaba quieto toda la línea y luego subía de golpe). Solo hacia adelante,
+        salvo back=True (la voz se encontró con seguridad más atrás: empezó en otra parte)."""
         if not self._text.strip() or pos < 0:
             return
-        meta = clamp(self._line_top(pos), 0.0, self.max_offset())
-        self._follow_target = meta if back else max(self._follow_target, meta)
+        meta = clamp(self._line_top(pos) + self._line_fraction(pos) * self._line_h, 0.0, self.max_offset())
+        ahora = time.monotonic()
+        if back:
+            self._follow_target, self._follow_heard = meta, [(ahora, meta)]
+            return
+        self._follow_target = max(self._follow_target, meta)
+        self._follow_heard = [(t, m) for t, m in self._follow_heard if ahora - t <= FOLLOW_RATE_WINDOW_S]
+        self._follow_heard.append((ahora, max(meta, self._follow_heard[-1][1] if self._follow_heard else meta)))
+
+    def _line_fraction(self, pos: int) -> float:
+        """Qué parte de su línea (0..1) queda antes del final de la palabra que acaba en pos."""
+        bloque = self._doc.findBlock(max(0, pos - 1))
+        if not bloque.isValid():
+            return 0.0
+        rel = pos - bloque.position()
+        linea = bloque.layout().lineForTextPosition(max(0, rel - 1))
+        if not linea.isValid() or linea.naturalTextWidth() <= 0:
+            return 0.0
+        x = linea.cursorToX(rel)
+        x = x[0] if isinstance(x, tuple) else x
+        return clamp((x - linea.x()) / linea.naturalTextWidth(), 0.0, 1.0)
+
+    def _extrapolate_follow(self, dt_s: float) -> None:
+        """Entre dos palabras reconocidas, el texto sigue un poco al ritmo con que se viene hablando: como mucho
+        FOLLOW_MAX_LEAD líneas por delante de la última palabra oída y durante FOLLOW_COAST_S tras ella (si se calla,
+        se para)."""
+        if len(self._follow_heard) < 2:
+            return
+        (t0, m0), (t1, m1) = self._follow_heard[0], self._follow_heard[-1]
+        if time.monotonic() - t1 > FOLLOW_COAST_S or t1 - t0 < 0.5:
+            return
+        ritmo = min((m1 - m0) / (t1 - t0), FOLLOW_MAX_RATE_LINES * self._line_h)
+        if ritmo > 0:
+            self._follow_target = min(self._follow_target + ritmo * dt_s, m1 + FOLLOW_MAX_LEAD * self._line_h)
 
     def _manual_moved(self) -> None:
         """El usuario movió el texto (rueda, barra, teclas, bandera): el modo Smart sigue desde ahí."""
         self._follow_target = self._offset
+        self._follow_heard = []                     # el ritmo medido era de otro sitio
         if self.on_manual_move is not None:
             self.on_manual_move()
 
@@ -718,7 +794,18 @@ class _PrompterLogic:
         letra = QTextCharFormat()
         letra.setFont(self._font)
         letra.setForeground(QColor(TEXT_COLOR))
+        letra.setUnderlineStyle(QTextCharFormat.UnderlineStyle.NoUnderline)
         cursor.mergeCharFormat(letra)
+        if self._hard_words:
+            dificil = QTextCharFormat()
+            dificil.setUnderlineStyle(QTextCharFormat.UnderlineStyle.DotLine)
+            dificil.setUnderlineColor(QColor(HARD_WORD_COLOR))
+            n = self._doc.characterCount() - 1
+            for a, b in self._hard_words:
+                if b <= n:
+                    cursor.setPosition(a)
+                    cursor.setPosition(b, QTextCursor.MoveMode.KeepAnchor)
+                    cursor.mergeCharFormat(dificil)
 
     def _relayout_keep_position(self) -> None:
         """Vuelve a maquetar (letra, tamaño, espaciado, margen, ancho) sin perder lo que se está leyendo: la misma
@@ -912,6 +999,14 @@ class _PrompterLogic:
             self._paint_flag(painter, guia_y + top - self._offset, cross=bajo_raton)
         if hover_top is not None and not hay_en_hover:
             self._paint_flag(painter, guia_y + hover_top - self._offset, GHOST_ALPHA)
+        if self._review_level == "atento":
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(REVIEW_COLOR))
+            radio = clamp(self._line_h * 0.08, 3.0, 7.0)
+            for pos in self._review_marks:                  # punto ámbar junto a la frase con un posible error
+                y = guia_y + self._line_top(pos) - self._offset
+                if -radio <= y <= self.height() + radio:
+                    painter.drawEllipse(QPointF(max(radio + 2.0, self._margin_px - 8.0), y), radio, radio)
         painter.restore()
 
     def _paint_overlay(self, painter: QPainter, centro_y: float, alto_banda: float) -> None:
@@ -965,6 +1060,12 @@ class _PrompterLogic:
         y = pista.top() + pista.height() * self.progress()
         painter.setBrush(QColor(GUIDE_COLOR))
         painter.drawRoundedRect(QRectF(pista.left(), pista.top(), TRACK_W, y - pista.top()), radio, radio)
+        if self._review_level in ("discreto", "atento") and self._review_marks:
+            painter.setBrush(QColor(REVIEW_COLOR))         # frases con un posible error: rayitas ámbar más cortas
+            top = self.max_offset()
+            for pos in self._review_marks:
+                p = clamp(self._line_top(pos) / top, 0.0, 1.0) if top > 0 else 0.0
+                painter.drawRect(QRectF(pista.left() - 2, pista.top() + pista.height() * p - 1.5, TRACK_W + 4, 3))
         painter.setBrush(QColor(FLAG_COLOR))
         for marca in self.mark_progresses():
             painter.drawRect(QRectF(pista.left() - 5, pista.top() + pista.height() * marca - 2, TRACK_W + 10, 4))

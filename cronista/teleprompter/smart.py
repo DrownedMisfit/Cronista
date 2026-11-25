@@ -87,6 +87,183 @@ def tokenize(text: str) -> list[tuple[str, int, int]]:
     return tokens
 
 
+FILLERS = {"es": ["eh", "este", "pues", "bueno", "o", "sea", "mm"], "en": ["uh", "um", "so", "well"]}
+
+
+def script_vocabulary(text: str, lang: str = "es") -> list[str]:
+    """Las palabras del guion (y unas muletillas) para limitar el reconocedor a ellas: así entiende mucho mejor lo
+    que se lee, también con la voz cansada. «[unk]» recoge lo demás (improvisar, toser) sin inventar palabras."""
+    vistas: dict[str, None] = {}
+    for m in _WORD_RE.finditer(text.lower()):
+        vistas.setdefault(m.group(0), None)
+    for palabra in FILLERS.get(lang, []):
+        vistas.setdefault(palabra, None)
+    return [*vistas, "[unk]"]
+
+
+# ---------------------------------------------------------------- palabras que el modelo no conoce
+
+_UNIDADES = ("cero uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciséis "
+             "diecisiete dieciocho diecinueve veinte veintiuno veintidós veintitrés veinticuatro veinticinco "
+             "veintiséis veintisiete veintiocho veintinueve").split()
+_DECENAS = "treinta cuarenta cincuenta sesenta setenta ochenta noventa".split()
+_CENTENAS = ("ciento doscientos trescientos cuatrocientos quinientos seiscientos setecientos ochocientos "
+             "novecientos").split()
+
+
+def number_words(n: int) -> list[str]:
+    """Un número (0 a 999 999) dicho en español, en palabras: 2026 → dos mil veintiséis."""
+    if n < 30:
+        return [_UNIDADES[n]]
+    if n < 100:
+        d, u = divmod(n, 10)
+        return [_DECENAS[d - 3]] + (["y", _UNIDADES[u]] if u else [])
+    if n < 1000:
+        c, r = divmod(n, 100)
+        return (["cien"] if n == 100 else [_CENTENAS[c - 1]]) + (number_words(r) if r else [])
+    m, r = divmod(n, 1000)
+    return ([] if m == 1 else number_words(m)) + ["mil"] + (number_words(r) if r else [])
+
+
+def _sin_tildes(w: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFD", w) if unicodedata.category(ch) != "Mn")
+
+
+def spoken_pieces(word: str, knows: Callable[[str], bool], lang: str = "es") -> list[str] | None:
+    """Palabras que el modelo SÍ conoce y que suenan como `word` (que no conoce), o None si no hay.
+
+    El reconocedor limitado al guion no devuelve «[unk]» ante una palabra que no conoce: la cambia por otras del
+    guion («las cinemáticas» → «las tiene eh») y el seguidor perdía el hilo justo ahí. Con estas piezas la oye:
+    - cifras en palabras: «6» → seis; «mp3» → mp tres; «2026» → dos mil veintiséis;
+    - la misma palabra casi igual: «cinemáticas» → cinemática; sin tilde;
+    - partida en trozos conocidos: «injugable» → in jugable."""
+    w = word.lower()
+    if any(ch.isdigit() for ch in w):
+        partes: list[str] = []
+        for grupo in re.findall(r"\d+|[^\W\d_]+", w):
+            if grupo.isdigit():
+                if lang != "es" or len(grupo) > 6:
+                    return None
+                partes += number_words(int(grupo))
+            else:
+                partes.append(grupo)
+        return partes if partes and all(knows(x) for x in partes) else None
+    parecidas = [_sin_tildes(w), w + "s"]
+    if w.endswith("es"):
+        parecidas.append(w[:-2])
+    if w.endswith("s"):
+        parecidas.append(w[:-1])
+    for v in parecidas:
+        if len(v) >= 3 and v != w and knows(v):
+            return [v]
+    if len(w) < 5:
+        return None
+    # En dos trozos, cuanto más igualados mejor (el más corto, lo más largo posible); si no, en tres.
+    mejor: tuple[int, list[str]] | None = None
+    for i in range(2, len(w) - 1):
+        a, b = w[:i], w[i:]
+        corto = min(len(a), len(b))
+        if corto >= 2 and (mejor is None or corto > mejor[0]) and knows(a) and knows(b):
+            mejor = (corto, [a, b])
+    if mejor is not None:
+        return mejor[1]
+    for i in range(2, len(w) - 3):
+        for j in range(i + 2, len(w) - 1):
+            trozos = [w[:i], w[i:j], w[j:]]
+            if all(knows(x) for x in trozos):
+                return trozos
+    return None
+
+
+_LETRAS_ES = {"a": "a", "b": "be", "c": "ce", "d": "de", "e": "e", "f": "efe", "g": "ge", "h": "hache", "i": "i",
+              "j": "jota", "k": "ka", "l": "ele", "m": "eme", "n": "ene", "ñ": "eñe", "o": "o", "p": "pe", "q": "cu",
+              "r": "erre", "s": "ese", "t": "te", "u": "u", "v": "uve", "w": "uve doble", "x": "equis", "y": "ye",
+              "z": "zeta"}
+_SIGLA_RE = re.compile(r"\b(?=[A-ZÑ0-9]*[A-ZÑ][A-ZÑ0-9]*[A-ZÑ0-9]\b)(?=(?:[^\W\d_]*[A-ZÑ]){2}|[A-ZÑ]+\d)[A-ZÑ0-9]{2,6}\b")
+
+
+def acronyms(text: str) -> set[str]:
+    """Siglas escritas en mayúsculas (ONU, MP3, NASA; hasta 4 letras), en minúsculas: se dicen letra a letra."""
+    siglas = {m.group(0).lower() for m in _SIGLA_RE.finditer(text)}
+    return {s for s in siglas if sum(ch.isalpha() for ch in s) <= 4}       # «NUNCA» en mayúsculas no es una sigla
+
+
+def spelled(word: str, knows: Callable[[str], bool], lang: str = "es") -> list[str] | None:
+    """La sigla dicha letra a letra (y las cifras en palabras): onu → o ene u; mp3 → eme pe tres."""
+    if lang != "es":
+        return None
+    partes: list[str] = []
+    for grupo in re.findall(r"\d+|[^\W\d_]+", word.lower()):
+        if grupo.isdigit():
+            if len(grupo) > 6:
+                return None
+            partes += number_words(int(grupo))
+        else:
+            for letra in grupo:
+                if letra not in _LETRAS_ES:
+                    return None
+                partes += _LETRAS_ES[letra].split()
+    return partes if partes and all(knows(x) for x in partes) else None
+
+
+def spoken_forms(words, knows: Callable[[str], bool], lang: str = "es",
+                 acronyms_: set[str] | None = None) -> dict[str, list[list[str]]]:
+    """{palabra: [formas de decirla con palabras que el modelo SÍ conoce]} para las que hace falta y tienen arreglo:
+    las que no conoce (spoken_pieces) y las siglas, que se deletrean («ONU» → o ene u) aunque las conozca."""
+    formas: dict[str, list[list[str]]] = {}
+    for w in words:
+        if w == "[unk]":
+            continue
+        variantes = []
+        if not knows(w):
+            piezas = spoken_pieces(w, knows, lang)
+            if piezas:
+                variantes.append(piezas)
+        if acronyms_ and w in acronyms_:
+            letras = spelled(w, knows, lang)
+            if letras and letras not in variantes:
+                variantes.append(letras)
+        if variantes:
+            formas[w] = variantes
+    return formas
+
+
+class SpokenForms:
+    """Vuelve a juntar en la palabra del guion las piezas que el reconocedor oyó por separado («in jugable» →
+    injugable, «seis» → 6). Una pieza suelta que también está escrita en el guion se deja como está."""
+
+    def __init__(self, forms: dict[str, list[list[str]]] | None = None,
+                 script_words: set[str] | None = None) -> None:
+        self._map: dict[tuple[str, ...], str] = {}
+        for palabra, variantes in (forms or {}).items():
+            for piezas in variantes:
+                clave = tuple(normalize(x) for x in piezas)
+                if not all(clave) or (len(clave) == 1 and clave[0] in (script_words or set())):
+                    continue
+                self._map.setdefault(clave, normalize(palabra))
+        self._max = max((len(k) for k in self._map), default=0)
+
+    def __bool__(self) -> bool:
+        return bool(self._map)
+
+    def rewrite(self, words: list[str]) -> list[str]:
+        """Palabras ya normalizadas → las mismas con las piezas juntadas."""
+        if not self._map:
+            return words
+        out, i = [], 0
+        while i < len(words):
+            for largo in range(min(self._max, len(words) - i), 0, -1):
+                destino = self._map.get(tuple(words[i:i + largo]))
+                if destino is not None:
+                    out.append(destino)
+                    i += largo
+                    break
+            else:
+                out.append(words[i])
+                i += 1
+        return out
+
+
 def guess_language(text: str) -> str:
     """'es' o 'en' según las palabras vacías más frecuentes. Por defecto 'es'."""
     words = [w for w, _, _ in tokenize(text)]
@@ -126,7 +303,15 @@ class ScriptFollower:
         self._cur = -1
         self._pos = 0
         self._misses = 0         # intentos seguidos sin encajar cerca
+        self._next = 0           # índice de la siguiente palabra que se espera oír
+        self._history: list[str] = []   # palabras ya cerradas por el reconocedor que aún no sirvieron para avanzar
+        self._ya_dicho = 0       # en el último intento, la cadena más larga que encajaba con lo ya leído
         self.jumped = False      # True si el último encaje fue un salto lejano (puede ser hacia atrás)
+        self._formas = SpokenForms()
+
+    def set_spoken_forms(self, forms: dict[str, list[list[str]]] | None) -> None:
+        """Piezas con que se oyen las palabras que el modelo no conoce (spoken_forms): se juntan al oírlas."""
+        self._formas = SpokenForms(forms, {w for w, _, _ in self._words})
 
     def reset(self, char_pos: int) -> None:
         """Coloca el lector en la palabra que contiene o sigue a `char_pos`
@@ -143,7 +328,9 @@ class ScriptFollower:
                 idx = i
                 break
         self._cur = idx
+        self._next = idx
         self._misses = 0
+        self._history = []                  # lo oído antes era de otro sitio del guion
 
     def position(self) -> int:
         """Carácter actual del lector (fin de la última palabra encajada)."""
@@ -153,14 +340,30 @@ class ScriptFollower:
         """(índice de la palabra actual, total de palabras)."""
         return max(self._cur, 0), len(self._words)
 
-    def feed(self, heard: list[str]) -> int | None:
+    def feed(self, heard: list[str], final: bool = False) -> int | None:
         """Recibe las últimas palabras reconocidas. Si encajan hacia adelante,
         avanza y devuelve el carácter del final de la última palabra encajada.
-        Si no, devuelve None y no mueve nada."""
-        heard_norm = [n for n in (normalize(w) for w in heard) if n][-HEARD_TAIL:]
+        Si no, devuelve None y no mueve nada.
+
+        final=True: el reconocedor cerró ese trozo; sus palabras se recuerdan y se usan delante de los trozos
+        siguientes. Con la voz lenta o cansada el reconocedor corta en trozos de una o dos palabras, y mirándolos
+        sueltos nunca había bastantes palabras seguidas para estar seguro (se atascaba varios segundos)."""
+        nuevas = [n for n in (normalize(w) for w in heard) if n]
+        heard_norm = self._formas.rewrite(self._history + nuevas)[-HEARD_TAIL:]
         n = len(self._words)
-        if not heard_norm or n == 0:
+        if not nuevas or n == 0:
             return None
+        encontrado = self._feed_norm(heard_norm)
+        # La memoria solo guarda lo que aún no ha servido para avanzar: si ya se usó, al enlazarla con palabras
+        # nuevas encajaba en una frase parecida de más adelante («el combate siente» + «lento»).
+        if encontrado is not None or (final and self._ya_dicho >= max(1, len(heard_norm) - 1)):
+            self._history = []
+        elif final:
+            self._history = heard_norm
+        return encontrado
+
+    def _feed_norm(self, heard_norm: list[str]) -> int | None:
+        n = len(self._words)
 
         cur = self._cur
         lo = max(0, cur - WINDOW_BEHIND)
@@ -212,22 +415,25 @@ class ScriptFollower:
         palabras seguidas. Así una frase parecida de más adelante no le gana a la que se está leyendo."""
         cur = self._cur
         best = self._chains(heard_norm, lo, hi)
-        ya_dicho = 0                                  # la cadena más larga que coincide con lo ya leído
+        ya_dicho = self._ya_dicho = 0                 # la cadena más larga que coincide con lo ya leído
         tramos: tuple[list, list, list] = ([], [], [])
         for (i, j), (length, _) in best.items():
             if j < cur or self._words[j][2] <= self._pos:
-                ya_dicho = max(ya_dicho, length)
+                ya_dicho = self._ya_dicho = max(ya_dicho, length)
                 continue
             cadena = self._chain_words(best, (i, j))      # de la última palabra a la primera
-            hueco = cadena[-1] - cur
+            hueco = cadena[-1] - self._next               # palabras del guion saltadas antes de lo oído
             tramo = 0 if hueco <= NEAR_GAP else 1 if hueco <= MID_GAP else 2
             if self._vale_en_tramo(tramo, cadena):
-                tramos[tramo].append((length, j))
+                tramos[tramo].append((length, j, hueco))
 
         elegido = None
-        if tramos[0]:
-            elegido = max(tramos[0], key=lambda c: (c[0], -c[1]))         # la más larga; si empatan, la más cercana
-        else:
+        # Seguir justo donde va siempre vale; saltarse palabras, solo si lo oído no es lo que se acaba de leer (el
+        # reconocedor repite trozos: «combate siente» dos veces saltaba a la frase casi igual que venía después).
+        cerca = [c for c in tramos[0] if c[2] <= 0 or c[0] > ya_dicho]
+        if cerca:
+            elegido = max(cerca, key=lambda c: (c[0], -c[1]))             # la más larga; si empatan, la más cercana
+        elif not tramos[0]:
             for candidatos in tramos[1:]:
                 candidatos = [c for c in candidatos if c[0] > ya_dicho]   # lo oído encaja igual aquí: no se salta
                 if not candidatos:
@@ -241,6 +447,7 @@ class ScriptFollower:
         if elegido is None:
             return None
         self._cur = elegido[1]
+        self._next = elegido[1] + 1
         self._pos = self._words[elegido[1]][2]
         return self._pos
 
@@ -275,7 +482,7 @@ class ScriptFollower:
         if len({j // 8 for j in lugares}) > 1:      # la misma frase en dos sitios: mejor no saltar
             return None
         j = max(lugares)
-        self._cur, self._pos, self._misses = j, self._words[j][2], 0
+        self._cur, self._pos, self._misses, self._next = j, self._words[j][2], 0, j + 1
         self.jumped = True
         return self._pos
 
@@ -389,6 +596,15 @@ def _words(result: dict, key: str) -> list[str]:
 _MODEL_CACHE: dict = {}
 
 
+def _model_lacks(modelo, palabra: str) -> bool:
+    """¿El modelo de Vosk no conoce esa palabra? (Si no se puede saber, se supone que sí la conoce.)"""
+    buscar = getattr(modelo, "vosk_model_find_word", None) or getattr(modelo, "find_word", None)
+    try:
+        return buscar is not None and buscar(palabra) < 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def input_devices() -> list[str]:
     """Nombres de los micrófonos (los de MME, la lista clásica de Windows, sin repetidos)."""
     try:
@@ -404,11 +620,32 @@ def input_devices() -> list[str]:
         return []
 
 
+def device_index(nombre: str | int | None) -> int | None:
+    """El número del micrófono con ese nombre en MME. Por el nombre solo, sounddevice falla si Windows lo enseña en
+    varios sistemas de sonido («Micrófono (D1)» sale en MME, DirectSound, WASAPI y WDM-KS: «Multiple input devices
+    found»). None = el predeterminado; si no está (se desconectó), también el predeterminado."""
+    if nombre is None or nombre == "" or isinstance(nombre, int):
+        return nombre or None
+    try:
+        import sounddevice as sd
+        apis = sd.query_hostapis()
+        candidatos = [i for i, d in enumerate(sd.query_devices())
+                      if d["max_input_channels"] > 0 and d["name"] == nombre]
+        for i in candidatos:
+            if apis[sd.query_devices(i)["hostapi"]]["name"] == "MME":
+                return i
+        return candidatos[0] if candidatos else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class VoiceListener(QObject):
     """Escucha el micrófono y emite las palabras reconocidas.
 
     Señales:
-      heard(list)  palabras del parcial o final actual (solo cuando cambian)
+      heard(list)  palabras del parcial actual (solo cuando cambian)
+      heard_final(list) palabras de un trozo que el reconocedor dio por cerrado
+      analysed()   ya están unknown_words y spoken_forms
       level(float) volumen de entrada 0–1
       error(str)   mensaje en español
       started() / stopped()
@@ -418,6 +655,8 @@ class VoiceListener(QObject):
     """
 
     heard = Signal(list)
+    heard_final = Signal(list)
+    analysed = Signal()          # ya se sabe qué palabras del guion no conoce el modelo (unknown_words, spoken_forms)
     level = Signal(float)
     error = Signal(str)
     started = Signal()
@@ -427,15 +666,23 @@ class VoiceListener(QObject):
         super().__init__(parent)
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
+        self.unknown_words: set[str] = set()   # palabras del guion que el modelo no conoce (se rellena al empezar)
+        self.spoken_forms: dict[str, list[list[str]]] = {}   # cómo oír esas (y las siglas) con palabras que conoce
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, lang: str, device: str | int | None = None) -> None:
-        """device: nombre (o número) del micrófono; None = el predeterminado de Windows."""
+    def start(self, lang: str, device: str | int | None = None, vocabulary: list[str] | None = None,
+              acronyms_: set[str] | None = None) -> None:
+        """device: nombre (o número) del micrófono; None = el predeterminado de Windows.
+        vocabulary: palabras a las que limitar el reconocedor (script_vocabulary del guion).
+        acronyms_: siglas del guion (acronyms): también se esperan deletreadas."""
         if self.is_running():
             return
-        self._device = device or None
+        self._device = device_index(device)      # (por número: el nombre se repite en cada sistema de sonido)
+        self._vocabulary = vocabulary
+        self._lang = lang
+        self._acronyms = set(acronyms_ or ())
         path = model_path(lang)
         if path is None:
             self.error.emit(f"No está descargado el modelo de voz para «{lang}». "
@@ -475,7 +722,26 @@ class VoiceListener(QObject):
             modelo = _MODEL_CACHE.get(str(path))
             if modelo is None:                     # (cargarlo tarda ~1 s: se guarda para la próxima lectura)
                 modelo = _MODEL_CACHE[str(path)] = vosk.Model(str(path))
-            recognizer = vosk.KaldiRecognizer(modelo, RATE)
+            recognizer = None
+            vocabulario = getattr(self, "_vocabulary", None)
+            # Palabras del guion que el modelo no conoce: no podrá oírlas nunca, así que no se exigen al revisar.
+            self.unknown_words = {w for w in (vocabulario or []) if w != "[unk]" and _model_lacks(modelo, w)}
+            # Y de esas, las que se pueden oír como otras que sí conoce («in jugable», «seis»): se añaden esas piezas.
+            siglas = getattr(self, "_acronyms", set()) or set()
+            self.spoken_forms = spoken_forms(sorted(self.unknown_words | siglas), lambda w: not _model_lacks(modelo, w),
+                                             getattr(self, "_lang", "es"), siglas)
+            if vocabulario and self.spoken_forms:
+                extra = [x for variantes in self.spoken_forms.values() for piezas in variantes for x in piezas
+                         if x not in vocabulario]
+                vocabulario = [*vocabulario[:-1], *dict.fromkeys(extra), vocabulario[-1]]
+            self.analysed.emit()
+            if vocabulario:
+                try:                               # limitado al guion: entiende mucho mejor lo que se lee
+                    recognizer = vosk.KaldiRecognizer(modelo, RATE, json.dumps(vocabulario, ensure_ascii=False))
+                except Exception:  # noqa: BLE001 - un modelo sin esa opción: se escucha sin limitar
+                    log.warning("El modelo de voz no admite limitar el vocabulario; se escucha sin limitar")
+            if recognizer is None:
+                recognizer = vosk.KaldiRecognizer(modelo, RATE)
         except Exception as e:
             self.error.emit(f"No se pudo cargar el modelo de voz: {e}")
             return
@@ -505,14 +771,14 @@ class VoiceListener(QObject):
                         words = _words(json.loads(recognizer.Result()), "text")
                         last = []
                         if words:
-                            self.heard.emit(words)
+                            self.heard_final.emit(words)
                     else:
                         words = _words(json.loads(recognizer.PartialResult()), "partial")
                         if words and words != last:
                             last = words
                             self.heard.emit(words)
                 final = _words(json.loads(recognizer.FinalResult()), "text")
-                if final and final != last:
-                    self.heard.emit(final)
+                if final:
+                    self.heard_final.emit(final)
         except Exception as e:
             self.error.emit(f"Se perdió el micrófono: {e}")

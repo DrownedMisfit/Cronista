@@ -5,6 +5,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import re  # noqa: E402
 import zipfile  # noqa: E402
 import zlib  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -861,7 +862,7 @@ def test_margen_inferior_de_la_vista_es_el_alto_de_la_barra_de_controles(qapp, t
     w.show()
     w.resize(900, 650)
     qapp.processEvents()
-    assert w._view._bottom_inset == w._bar.sizeHint().height()
+    assert w._view._bottom_inset == w._bar.height()
     assert w._view._bottom_inset > 0
     assert w._view._track_rect().bottom() <= w._bar.y()     # la barra de avance no queda debajo de los controles
     w.close()
@@ -1327,11 +1328,11 @@ def test_cuenta_atras_no_empieza_a_leer_hasta_el_ultimo_segundo(qapp, tmp_path):
     w._tick_cuenta()                        # 1
     assert w.is_counting_down() and not w._view.is_playing()
     assert w._cuenta_label.text() == "1"
-    assert w._btn_play.text() == "✕ Cancelar"
+    assert w._btn_play.text() == "Cancelar"
     w._tick_cuenta()                        # 0: empieza a leer
     assert not w.is_counting_down()
     assert w._view.is_playing()
-    assert w._btn_play.text() == "⏸ Pausar"
+    assert w._btn_play.text() == "Pausar"
     assert not w._cuenta_label.isVisible()
     w.close()
 
@@ -1344,7 +1345,7 @@ def test_espacio_durante_la_cuenta_la_cancela(qapp, tmp_path):
     QTest.keyClick(w._view, Qt.Key.Key_Space)      # cancela
     assert not w.is_counting_down()
     assert not w._view.is_playing()
-    assert w._btn_play.text() == "▶ Iniciar"
+    assert w._btn_play.text() == "Iniciar"
     w._tick_cuenta()                               # aunque llegue un tick viejo no debe arrancar
     assert not w._view.is_playing()
     w.close()
@@ -1402,7 +1403,7 @@ def test_formato_de_tiempo():
 
 def test_indicador_de_tiempo_sin_texto_muestra_guion(qapp, tmp_path):
     w = TeleprompterWindow(Settings(), text_path=tmp_path / "t.txt")
-    assert w._lbl_tiempo.text() == "⏱ —"
+    assert w._lbl_tiempo.text() == "—"
     w.close()
 
 
@@ -1413,12 +1414,12 @@ def test_indicador_de_tiempo_avanza_y_lo_que_falta_baja(qapp, tmp_path):
     v.set_speed(10)
     px_s = tt.speed_to_px_per_s(v.speed(), v.line_height())
     total = v.max_offset() / px_s
-    assert w._lbl_tiempo.text() == (f"⏱ 0:00 / {formato_tiempo(total)} · faltan {formato_tiempo(total)}")
+    assert w._lbl_tiempo.text() == (f"0:00 / {formato_tiempo(total)} · faltan {formato_tiempo(total)}")
     falta_antes = total
     v.play()
     v.advance(6.0)                                 # 6 s de lectura a velocidad 10
     assert v.offset() / px_s == pytest.approx(6.0, rel=1e-6)
-    assert w._lbl_tiempo.text() == (f"⏱ 0:06 / {formato_tiempo(total)} · "
+    assert w._lbl_tiempo.text() == (f"0:06 / {formato_tiempo(total)} · "
                                     f"faltan {formato_tiempo(total - 6.0)}")
     assert total - 6.0 < falta_antes
     v.pause()
@@ -1638,3 +1639,53 @@ def test_sin_analizador_se_usan_las_reglas(qapp, monkeypatch):
     from cronista.teleprompter import gramatica
     monkeypatch.setattr(gramatica, "_load", lambda: None)
     assert gramatica.pause_costs("Una frase cualquiera.") is None
+
+# ---- modo Smart: movimiento continuo -----------------------------------------------
+def test_smart_sube_en_proporcion_a_lo_dicho_de_la_linea(qapp):
+    v = _vista("Una línea bastante larga con muchas palabras para que ocupe todo el ancho de la vista sin duda")
+    v.set_font_size(20)                                           # que quepan varias palabras por línea
+    v.set_follow(True)
+    palabras = list(re.finditer(r"\S+", v.text()))
+    primera_linea = [p for p in palabras if v._line_top(p.end()) == pytest.approx(v._line_top(palabras[0].end()))]
+    assert len(primera_linea) >= 3
+    v.follow_to(primera_linea[0].end())
+    al_principio = v._follow_target
+    v.follow_to(primera_linea[-1].end())
+    assert v._follow_target > al_principio                       # dentro de la misma línea ya sube
+    assert v._follow_target - al_principio <= v.line_height() + 1
+
+
+def test_smart_sigue_al_ritmo_entre_palabras_y_se_para_si_te_callas(qapp, monkeypatch):
+    import cronista.teleprompter.view as vista_mod
+    v = _vista()
+    v.set_follow(True)
+    reloj = [100.0]
+    monkeypatch.setattr(vista_mod.time, "monotonic", lambda: reloj[0])
+    palabras = list(re.finditer(r"\S+", v.text()))
+    for k in (0, 6, 12):                                          # tres palabras oídas en dos segundos
+        v.follow_to(palabras[k].end())
+        reloj[0] += 1.0
+    reloj[0] -= 0.5
+    meta = v._follow_target
+    v._extrapolate_follow(0.2)
+    assert v._follow_target > meta                                # entre palabras sigue a tu ritmo…
+    assert v._follow_target <= v._follow_heard[-1][1] + 0.5 * v.line_height() + 1e-6
+    reloj[0] += 2.0                                               # …y si te callas, se para
+    meta = v._follow_target
+    v._extrapolate_follow(0.2)
+    assert v._follow_target == meta
+
+def test_icono_y_ventana_de_arranque(qapp):
+    from PySide6.QtGui import QColor
+    from cronista.teleprompter import arranque
+    assert (arranque.ASSETS / "cronista.ico").exists() and not arranque.icon().isNull()
+    arranque.set_app_identity(qapp)
+    assert not qapp.windowIcon().isNull()
+    assert arranque.mostrar_arranque(qapp) is None              # sin pantalla de verdad (pruebas): no sale
+    pm, caja, resplandor, reflejo = arranque.pintar_arranque(QColor("#1b1d22"), QColor("#e8eaf0"), 1.0)
+    assert pm.width() == arranque.TAMANO[0] and not caja.isNull() and not resplandor.isNull()
+    v = arranque.ArranqueWindow(QColor("#1b1d22"), QColor("#e8eaf0"))
+    abierta = []
+    v.play(lambda: abierta.append(True))
+    v._saltar()                                                 # un clic o una tecla la saltan y abre ya
+    assert abierta == [True]

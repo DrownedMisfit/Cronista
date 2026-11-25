@@ -23,6 +23,7 @@ CÓMO SE USA
 - Flechas arriba / abajo: velocidad. + / -: tamaño de letra. F11: pantalla completa. Esc: salir de ella.
 - M: espejo (para el cristal de un teleprompter). C: centrar líneas. L: cambiar el tipo de letra.
 - F o «Líneas por frases»: corta las líneas por frases, para leer en voz alta con pausas naturales.
+- R: toma mala. Vuelve al principio de la frase y sigues tras una cuenta atrás corta.
 - «Ángulo de visión»: si miras la pantalla desde arriba o desde abajo, endereza el texto.
 - «Fluidez»: déjalo en Automático (usa los Hz de tu monitor sin sobrecargar la computadora).
 

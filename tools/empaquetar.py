@@ -33,6 +33,8 @@ DISTRIBUCION = ["Abrir Cronista.bat", "COMO USAR.txt", "requisitos.txt"]
 def _archivos() -> list[tuple[Path, str]]:
     lista = [(RAIZ / ruta, ruta) for ruta in CODIGO]
     lista += [(p, p.relative_to(RAIZ).as_posix()) for p in sorted((RAIZ / "cronista" / "teleprompter").glob("*.py"))]
+    lista += [(p, p.relative_to(RAIZ).as_posix())                   # icono, arranque, iconos Lucide y letra Inter
+              for p in sorted((RAIZ / "cronista" / "teleprompter" / "assets").rglob("*")) if p.is_file()]
     lista += [(p, p.relative_to(RAIZ).as_posix()) for p in sorted((RAIZ / "fonts").iterdir()) if p.is_file()]
     lista += [(RAIZ / "distribucion" / nombre, nombre) for nombre in DISTRIBUCION]
     lista.append((RAIZ / "LICENSE", "LICENSE.txt"))           # GPL v3
